@@ -302,13 +302,19 @@ class TestExecuteFirstAliveFallback:
         assert group._cells[0].is_errored
 
 
+NORMAL = TrainStepOutcome.NORMAL
+
+_ERR = RuntimeError("boom")
+_ERR2 = ValueError("boom2")
+
+
 def _alive_cells_for(results) -> list[SimpleNamespace]:
     """Mock alive cells aligned with a `results` list; only `.cell_index` is read."""
     return [SimpleNamespace(cell_index=i) for i in range(len(results))]
 
 
 class TestCheckTrainOneAttempt:
-    """_check_train_one_attempt raises ValueError when any non-exception cell has DISCARDED."""
+    """_check_train_one_attempt raises RuntimeError when all alive cells failed."""
 
     @pytest.mark.parametrize(
         "results",
@@ -325,20 +331,6 @@ class TestCheckTrainOneAttempt:
     @pytest.mark.parametrize(
         "results",
         [
-            [[DISCARDED]],  # single cell
-            [[DISCARDED], [DISCARDED, DISCARDED]],  # multi cell
-            [[NORMAL, DISCARDED]],  # mixed within same cell
-            [[NORMAL], [DISCARDED]],  # mixed across cells
-            [_ERR, [DISCARDED]],  # errored + discarded → retry
-        ],
-    )
-    def test_retry_when_discarded_exists(self, results):
-        with pytest.raises(ValueError, match="DISCARDED_SHOULD_RETRY"):
-            RayTrainGroup._check_train_one_attempt(_alive_cells_for(results), results)
-
-    @pytest.mark.parametrize(
-        "results",
-        [
             [_ERR],  # single cell errored
             [_ERR, _ERR2],  # multiple cells all errored
         ],
@@ -348,24 +340,10 @@ class TestCheckTrainOneAttempt:
             RayTrainGroup._check_train_one_attempt(_alive_cells_for(results), results)
 
     def test_compute_attempt_outcomes_buckets_cells_by_index(self):
-        """_compute_attempt_outcomes buckets each alive cell into errored / discarded / normal by index."""
-        results = [_ERR, [DISCARDED], [NORMAL, NORMAL]]
+        """_compute_attempt_outcomes buckets each alive cell into errored / normal by index."""
+        results = [_ERR, [NORMAL], [NORMAL, NORMAL]]
         outcomes = RayTrainGroup._compute_attempt_outcomes(_alive_cells_for(results), results)
-        assert outcomes == {"errored": [0], "discarded": [1], "normal": [2]}
-
-
-async def _set_all_train_return(group: RayTrainGroup, value: TrainStepOutcome) -> None:
-    for cell in group._cells:
-        for handle in cell._get_actor_handles():
-            ray.get(handle.set_train_return_value.remote(value))
-
-
-def _count_train_calls(group: RayTrainGroup, cell_index: int) -> int:
-    total = 0
-    for handle in group._cells[cell_index]._get_actor_handles():
-        calls = ray.get(handle.get_calls.remote())
-        total += sum(1 for c in calls if c[0] == "train")
-    return total
+        assert outcomes == {"errored": [0], "normal": [1, 2]}
 
 
 class TestAllocateWitnessInfo:

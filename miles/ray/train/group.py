@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 import ray
 from ray.util.placement_group import PlacementGroup
 
-from miles.backends.megatron_utils.types import TrainStepOutcome
 from miles.ray.train.actor_factory import allocate_gpus_for_actor
 from miles.ray.train.cell import RayTrainCell
 from miles.utils.async_utils import AsyncioGatherUtils
@@ -150,15 +149,9 @@ class RayTrainGroup:
     @staticmethod
     def _check_train_one_attempt(snapshot_alive_cells, results):
         outcomes = RayTrainGroup._compute_attempt_outcomes(snapshot_alive_cells, results)
-        if not outcomes["normal"] and not outcomes["discarded"]:
+        if not outcomes["normal"]:
             log_structured(logger.error, op="check", **outcomes, decision="retry", reason="all alive cells failed")
             raise RuntimeError("All cells failed in this training attempt")
-
-        # NOTE: If some cells errors + all other cells claim normal, we do *not* retry
-        #       This may happen when some cells fails *after* exchanging gradients w/ others
-        if outcomes["discarded"]:
-            log_structured(logger.warning, op="check", **outcomes, decision="retry", reason="discarded_should_retry")
-            raise ValueError("Exists DISCARDED_SHOULD_RETRY, thus need retry")
 
         log_structured(
             logger.info, op="check", **outcomes, decision="no_retry", reason="survivors normal, gradients valid"
@@ -168,13 +161,8 @@ class RayTrainGroup:
     def _compute_attempt_outcomes(snapshot_alive_cells, results) -> dict[str, list[int]]:
         paired = list(zip(snapshot_alive_cells, results, strict=True))
         errored = [c.cell_index for c, r in paired if isinstance(r, BaseException)]
-        discarded = [
-            c.cell_index
-            for c, r in paired
-            if not isinstance(r, BaseException) and any(o == TrainStepOutcome.DISCARDED_SHOULD_RETRY for o in r)
-        ]
-        normal = [c.cell_index for c, r in paired if c.cell_index not in errored and c.cell_index not in discarded]
-        return {"errored": errored, "discarded": discarded, "normal": normal}
+        normal = [c.cell_index for c, r in paired if c.cell_index not in errored]
+        return {"errored": errored, "normal": normal}
 
     # ------------------------ API :: others ------------------------
 
