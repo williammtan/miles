@@ -7,19 +7,11 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy, Place
 from ray.util.state import list_nodes
 
 from miles.utils.async_utils import eager_create_task
-from miles.utils.environ import enable_experimental_ft_trainer
 
+from .actor_group import RayTrainGroup
 from .rollout.rollout_manager import RolloutManager
 
 logger = logging.getLogger(__name__)
-
-
-def _select_train_group_class():
-    if enable_experimental_ft_trainer():
-        from miles.ray.train.group import RayTrainGroup
-    else:
-        from miles.ray.actor_group import RayTrainGroup
-    return RayTrainGroup
 
 
 @ray.remote(num_gpus=1)
@@ -133,8 +125,7 @@ def create_placement_groups(args):
 def allocate_train_group(
     args, num_nodes, num_gpus_per_node, pg, role: str, with_ref: bool, rollout_manager, with_opd_teacher: bool = False
 ):
-    train_group_cls = _select_train_group_class()
-    return train_group_cls(
+    return RayTrainGroup(
         args=args,
         num_nodes=num_nodes,
         num_gpus_per_node=num_gpus_per_node,
