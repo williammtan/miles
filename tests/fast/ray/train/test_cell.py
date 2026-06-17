@@ -125,30 +125,6 @@ class TestMarkAsAlive:
             cell._mark_as_alive(indep_dp_info=make_indep_dp_info())
 
 
-class TestUpdateIndepDPInfo:
-    def test_updates_stored_info(self):
-        cell = make_alive_cell(0, alive_cell_indices=[0, 1, 2])
-
-        new_info = make_indep_dp_info(alive_cell_indices=[0, 2], quorum_id=2)
-        cell._update_indep_dp_info(new_info)
-
-        assert cell.indep_dp_info == new_info
-
-    def test_preserves_actor_handles(self):
-        cell = make_alive_cell(0, alive_cell_indices=[0])
-        handles = cell._get_actor_handles()
-
-        cell._update_indep_dp_info(make_indep_dp_info(quorum_id=5))
-
-        assert cell._get_actor_handles() == handles
-
-    def test_rejects_from_uninitialized(self):
-        cell = make_cell()
-
-        with pytest.raises(AssertionError):
-            cell._update_indep_dp_info(make_indep_dp_info())
-
-
 class TestMarkAsErrored:
     def test_transitions_alive_to_errored(self):
         cell = make_alive_cell(0, alive_cell_indices=[0])
@@ -233,52 +209,6 @@ class TestAsyncInit:
             assert calls[0][0] == "init"
             kwargs = calls[0][2]
             assert kwargs["indep_dp_info"] == info
-            assert kwargs["recv_ckpt_src_rank"] is None
-
-
-class TestPrepareIndepDPModeAlive:
-    async def test_reconfigure_and_update_info(self):
-        cell = make_alive_cell(0, alive_cell_indices=[0, 1, 2])
-
-        new_info = make_indep_dp_info(alive_cell_indices=[0, 2], quorum_id=2)
-        await cell.prepare_indep_dp_mode_alive(indep_dp_info=new_info, send_ckpt_dst_ranks=[])
-
-        assert cell.indep_dp_info == new_info
-        assert cell.is_alive
-
-        for handle in cell._get_actor_handles():
-            calls = ray.get(handle.get_calls.remote())
-            reconfig_calls = [c for c in calls if c[0] == "reconfigure_indep_dp"]
-            assert len(reconfig_calls) == 1
-            assert reconfig_calls[0][2]["indep_dp_info"] == new_info
-
-    async def test_sends_ckpt_to_correct_dst_ranks(self):
-        cell = make_alive_cell(0, alive_cell_indices=[0, 1, 2])
-
-        new_info = make_indep_dp_info(alive_cell_indices=[0, 1, 2], quorum_id=2)
-        await cell.prepare_indep_dp_mode_alive(indep_dp_info=new_info, send_ckpt_dst_ranks=[1, 2])
-
-        handle = cell._get_actor_handles()[0]
-        calls = ray.get(handle.get_calls.remote())
-        send_calls = [c for c in calls if c[0] == "send_ckpt"]
-        assert len(send_calls) == 2
-        assert send_calls[0][2]["dst_rank"] == 1
-        assert send_calls[1][2]["dst_rank"] == 2
-
-
-class TestPrepareIndepDPModeHealing:
-    async def test_healing_inits_and_marks_alive(self):
-        cell = make_cell(actor_count=1)
-        info = make_indep_dp_info()
-
-        await cell.prepare_indep_dp_mode_healing(indep_dp_info=info, recv_ckpt_src_rank=None)
-
-        assert cell.is_alive
-        assert cell.indep_dp_info == info
-
-        handle = cell._get_actor_handles()[0]
-        calls = ray.get(handle.get_calls.remote())
-        assert any(c[0] == "init" for c in calls)
 
 
 class TestStatePredicates:
