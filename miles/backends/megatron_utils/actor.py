@@ -24,7 +24,6 @@ from miles.utils.processing_utils import load_tokenizer
 from miles.utils.ray_utils import Box
 from miles.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
 from miles.utils.replay_base import all_replay_managers, routing_replay_manager
-from miles.utils.structured_log import with_logs
 from miles.utils.test_utils.ft_test_actions import FTTestActionActorExecutor
 from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
@@ -65,7 +64,6 @@ logger = logging.getLogger(__name__)
 
 
 class MegatronTrainRayActor(TrainRayActor):
-    @with_logs
     @with_defer(lambda: Timer().start("train_wait"))
     def init(
         self,
@@ -252,7 +250,6 @@ class MegatronTrainRayActor(TrainRayActor):
 
         return start_rollout_id
 
-    @with_logs
     @timer
     def sleep(self) -> None:
         assert self.args.offload_train
@@ -271,7 +268,6 @@ class MegatronTrainRayActor(TrainRayActor):
         if should_log_cpu_memory:
             log_cpu_memory(self._last_rollout_id, self.args, "after_offload_train")
 
-    @with_logs
     @timer
     def wake_up(self) -> None:
         assert self.args.offload_train
@@ -301,7 +297,6 @@ class MegatronTrainRayActor(TrainRayActor):
         for m in all_replay_managers:
             m.stage = stage
 
-    @with_logs
     def compute_log_prob(
         self,
         data_iterator: list[DataIterator],
@@ -321,7 +316,6 @@ class MegatronTrainRayActor(TrainRayActor):
                 store_prefix=store_prefix,
             )
 
-    @with_logs
     @event_logger_context(
         lambda _self, rollout_id, rollout_data_ref, witness_info, attempt: dict(rollout_id=rollout_id, attempt=attempt)
     )
@@ -348,7 +342,6 @@ class MegatronTrainRayActor(TrainRayActor):
         else:
             return self.train_actor(rollout_id, rollout_data, witness_info=witness_info, attempt=attempt)
 
-    @with_logs
     def train_critic(self, rollout_id: int, rollout_data: RolloutBatch) -> TrainStepOutcome:
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
@@ -386,7 +379,6 @@ class MegatronTrainRayActor(TrainRayActor):
     def _use_rollout_replay(self, m) -> bool:
         return getattr(self.args, f"use_rollout_{m.name}_replay", False)
 
-    @with_logs
     def train_actor(
         self, rollout_id: int, rollout_data: RolloutBatch, *, witness_info: WitnessInfo | None, attempt: int
     ) -> TrainStepOutcome:
@@ -516,7 +508,6 @@ class MegatronTrainRayActor(TrainRayActor):
         self._heartbeat.bump()
         return train_step_outcome
 
-    @with_logs
     @timer
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
         self._heartbeat.bump()
@@ -545,7 +536,6 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             destroy_process_groups()
 
-    @with_logs
     @timer
     def update_weights(self, info: "EnginesAndLock") -> None:
         self._heartbeat.bump()
@@ -607,7 +597,6 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.offload_train:
             destroy_process_groups()
 
-    @with_logs
     def load_other_checkpoint(self, model_tag: str, path: str) -> None:
         old_args = self.args.load, self.args.no_load_optim, self.args.no_load_rng, self.args.finetune
         self.args.load = path
@@ -643,7 +632,6 @@ class MegatronTrainRayActor(TrainRayActor):
         self.weights_backuper.backup(model_tag)
         self._active_model_tag = model_tag
 
-    @with_logs
     def connect_actor_critic(
         self,
         actor_handle: ActorHandle | None = None,
@@ -667,7 +655,6 @@ class MegatronTrainRayActor(TrainRayActor):
             group_name=group_name,
         )
 
-    @with_logs
     def send_ckpt(self, dst_rank: int) -> None:
         # These states are not handled
         assert not self.args.keep_old_actor
@@ -681,7 +668,6 @@ class MegatronTrainRayActor(TrainRayActor):
             dst_rank=dst_rank,
         )
 
-    @with_logs
     def reconfigure_indep_dp(self, indep_dp_info: IndepDPInfo) -> None:
         reconfigure_indep_dp_group(
             parallel_state=get_parallel_state(),
