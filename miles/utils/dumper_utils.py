@@ -15,8 +15,6 @@ import torch.distributed as dist
 from sglang.srt.debug_utils.dumper import DumperConfig, _get_rank, dumper
 
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.utils.process_group_utils import GeneralPGUtil
-from miles.utils.structured_log import log_structured
 
 logger = logging.getLogger(__name__)
 
@@ -261,13 +259,10 @@ def _wrap_forward_step_with_stepping(forward_step_func: Callable) -> Callable:
 
 
 def _cleanup_dump_dir(dump_dir: Path) -> None:
-    # Only cell 0's rank 0 deletes — avoids race when multiple cells' rank 0
-    # all see _get_rank()==0 and try to rmtree the same directory.
-    # Best-effort: stale handles from a peer that crashed (NFS .nfsXXXX stubs)
-    # can make rmtree fail with "Directory not empty"; we don't want that to
-    # propagate up and mark the (healthy) cell as errored.
-    indep_dp = get_parallel_state().indep_dp
-    if (_get_rank() == 0) and (indep_dp.rank == 0) and dump_dir.is_dir():
+    # Best-effort: stale handles (NFS .nfsXXXX stubs) can make rmtree fail with
+    # "Directory not empty"; we don't want that to propagate up and mark the cell
+    # as errored.
+    if (_get_rank() == 0) and dump_dir.is_dir():
         try:
             shutil.rmtree(dump_dir)
         except OSError:
@@ -277,46 +272,6 @@ def _cleanup_dump_dir(dump_dir: Path) -> None:
 def _barrier_after_dump_dir_cleanup() -> None:
     if dist.is_initialized():
         dist.barrier()
-
-    indep_dp = get_parallel_state().indep_dp
-    if indep_dp.group is not None:
-        log_structured(
-            logger.info,
-            op="cross_cell",
-            phase="start",
-            kind="dump_barrier",
-            cell_rank=indep_dp.rank,
-            members=indep_dp.size,
-            **indep_dp.debug_info,
-        )
-        try:
-            GeneralPGUtil.create(indep_dp.group).barrier(indep_dp.group)
-            log_structured(
-                logger.info,
-                op="cross_cell",
-                phase="end",
-                kind="dump_barrier",
-                cell_rank=indep_dp.rank,
-                members=indep_dp.size,
-                **indep_dp.debug_info,
-                success=True,
-            )
-        except Exception:
-            # A dead peer aborts the cross-cell PG and releases this barrier with an
-            # error. Proceed: the peer cannot dump anyway, and the gradient allreduce
-            # later in the step turns the abort into DISCARDED_SHOULD_RETRY.
-            log_structured(
-                logger.error,
-                op="cross_cell",
-                phase="end",
-                kind="dump_barrier",
-                cell_rank=indep_dp.rank,
-                members=indep_dp.size,
-                **indep_dp.debug_info,
-                success=False,
-                degraded=True,
-                exc_info=True,
-            )
 
 
 def _get_phase_override_configs(args: Namespace, phase: DumperPhase) -> dict[str, Any]:
