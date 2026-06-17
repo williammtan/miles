@@ -27,13 +27,7 @@ def add_checkpoint_args(parser):
 
 
 def main(args):
-    from miles.utils.indep_dp import IndepDPInfo
-
-    megatron_utils.init(
-        args,
-        indep_dp_store_addr=None,
-        indep_dp_info=IndepDPInfo(cell_index=0, num_cells=1, alive_rank=0, alive_size=1, quorum_id=0),
-    )
+    megatron_utils.init(args)
 
     pp_size = mpu.get_pipeline_model_parallel_world_size()
     ep_size = mpu.get_expert_model_parallel_world_size()
