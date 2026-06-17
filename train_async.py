@@ -3,7 +3,6 @@ import asyncio
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
 from miles.utils.arguments import parse_args
 from miles.utils.async_utils import eager_create_task
-from miles.utils.control_server.server import start_control_server
 from miles.utils.logging_utils import configure_logger
 from miles.utils.misc import should_run_periodic_action
 from miles.utils.process_identity import MainProcessIdentity
@@ -24,14 +23,6 @@ async def train(args):
 
     # create the actor and critic models
     actor_model, critic_model = await create_training_models(args, pgs, rollout_manager)
-
-    if args.control_server_port:
-        start_control_server(
-            actor_model=actor_model,
-            rollout_manager=rollout_manager,
-            port=args.control_server_port,
-            ft_components=args.ft_components,
-        )
 
     # always update weight first so that sglang has the loaded weights from training.
     await actor_model.update_weights()
