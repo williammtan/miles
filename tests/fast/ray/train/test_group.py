@@ -289,25 +289,6 @@ class TestPerCellErrorIsolation:
 
 
 class TestExecuteFirstAliveFallback:
-    async def test_first_cell_fails_retry_falls_back_to_next(self):
-        """If the first alive cell fails, retry in save_model marks it errored and picks the next."""
-        group = await _make_alive_group(num_cells=3)
-
-        # Step 1: Make cell 0 fail on save_model
-        for handle in group._cells[0]._get_actor_handles():
-            ray.get(handle.set_fail_methods.remote(["save_model"]))
-
-        # Step 2: save_model uses retry(lambda _: self._execute_first_alive(...))
-        await group.save_model(rollout_id=42)
-
-        # Step 3: Cell 0 errored, cell 1 handled it
-        assert group._cells[0].is_errored
-        assert group._cells[1].is_alive
-
-        for handle in group._cells[1]._get_actor_handles():
-            calls = ray.get(handle.get_calls.remote())
-            assert any(c[0] == "save_model" for c in calls)
-
     async def test_single_execute_first_alive_raises_on_failure(self):
         """A single _execute_first_alive call raises (no retry) when the first cell fails."""
         group = await _make_alive_group(num_cells=2)
@@ -385,82 +366,6 @@ def _count_train_calls(group: RayTrainGroup, cell_index: int) -> int:
         calls = ray.get(handle.get_calls.remote())
         total += sum(1 for c in calls if c[0] == "train")
     return total
-
-
-class TestTrainRetry:
-    async def test_no_retry_on_normal(self):
-        """All cells return NORMAL → no retry, train called once per cell."""
-        group = await _make_alive_group(num_cells=2)
-
-        await group.train(rollout_id=0, rollout_data_pack=_DUMMY_DATA_PACK)
-
-        for i in range(2):
-            assert _count_train_calls(group, i) == 1
-
-    async def test_retry_on_all_discarded_then_normal(self):
-        """First attempt: all DISCARDED. Second attempt: all NORMAL. Train called twice."""
-        group = await _make_alive_group(num_cells=2)
-        await _set_all_train_return(group, TrainStepOutcome.DISCARDED_SHOULD_RETRY)
-
-        # After first train call, switch to NORMAL so second attempt succeeds
-        async def _do_train():
-            await group.train(rollout_id=0, rollout_data_pack=_DUMMY_DATA_PACK)
-
-        import asyncio
-
-        task = asyncio.create_task(_do_train())
-        # Give first attempt time to dispatch
-        await asyncio.sleep(0.3)
-        await _set_all_train_return(group, TrainStepOutcome.NORMAL)
-        await task
-
-        for i in range(2):
-            assert _count_train_calls(group, i) == 2
-
-    async def test_retry_multiple_times_then_succeed(self):
-        """DISCARDED 3 times, then NORMAL on 4th attempt."""
-        group = await _make_alive_group(num_cells=2)
-
-        # Use a counter-based actor to track attempts
-        await _set_all_train_return(group, TrainStepOutcome.DISCARDED_SHOULD_RETRY)
-
-        async def _do_train():
-            await group.train(rollout_id=0, rollout_data_pack=_DUMMY_DATA_PACK)
-
-        import asyncio
-
-        task = asyncio.create_task(_do_train())
-
-        # Wait for 3 retry rounds, then switch to NORMAL
-        for _ in range(3):
-            await asyncio.sleep(0.2)
-
-        await _set_all_train_return(group, TrainStepOutcome.NORMAL)
-        await task
-
-        for i in range(2):
-            assert _count_train_calls(group, i) >= 2
-
-    async def test_cell_errored_does_not_retry_when_others_normal(self):
-        """One cell errors during train but others return NORMAL → no retry.
-
-        See _check_train_one_attempt: 'If some cells errors + all other cells claim
-        normal, we do *not* retry. This may happen when some cells fails *after*
-        exchanging gradients w/ others.' So alive cells get exactly 1 train call.
-        """
-        group = await _make_alive_group(num_cells=3)
-
-        # Step 1: Make cell 1 fail (exception)
-        for handle in group._cells[1]._get_actor_handles():
-            ray.get(handle.set_fail_methods.remote(["train"]))
-
-        # Step 2: Train completes without retry (cell 1 errored but others NORMAL)
-        await group.train(rollout_id=0, rollout_data_pack=_DUMMY_DATA_PACK)
-
-        # Step 3: Cell 1 errored, alive cells each got 1 train call (no retry)
-        assert group._cells[1].is_errored
-        for i in [0, 2]:
-            assert _count_train_calls(group, i) == 1
 
 
 class TestAllocateWitnessInfo:

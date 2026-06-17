@@ -15,7 +15,6 @@ from miles.utils.event_logger.models import WitnessAllocateIdEvent
 from miles.utils.health_checker import NoopHealthChecker
 from miles.utils.indep_dp import IndepDPInfo
 from miles.utils.megatron_args_utils import compute_megatron_world_size_except_dp
-from miles.utils.retry_utils import retry
 from miles.utils.structured_log import log_structured
 from miles.utils.witness.allocator import WitnessIdAllocator, read_persisted_witness_counter
 
@@ -127,7 +126,7 @@ class RayTrainGroup:
             )
             self._check_train_one_attempt(snapshot_alive_cells, results)
 
-        await retry(_fn)
+        await _fn(attempt=0)
 
     def _allocate_witness_info(self, *, rollout_id: int, attempt: int, sample_indices):
         if self._witness_allocator is None:
@@ -199,8 +198,7 @@ class RayTrainGroup:
 
     async def save_model(self, rollout_id: int, force_sync: bool = False):
         """Save actor model. Only cell 0 saves to avoid file write conflicts."""
-        # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
-        await retry(lambda _: self._execute_first_alive("save_model", rollout_id, force_sync=force_sync))
+        await self._execute_first_alive("save_model", rollout_id, force_sync=force_sync)
 
     async def update_weights(self, rollout_id: int | None = None):
         """Broadcast weights to rollout engines."""
@@ -210,8 +208,7 @@ class RayTrainGroup:
         # ranks observe a consistent engine set; the actor releases the lock itself.
         info = await self._rollout_manager.get_updatable_engines_and_lock.remote()
         await self._rollout_manager.health_monitoring_pause.remote()
-        # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
-        await retry(lambda _: self._execute_first_alive("update_weights", info=info))
+        await self._execute_first_alive("update_weights", info=info)
 
     async def onload(self):
         # Catch *without* retry: cells w/ exceptions are auto marked errored, and will not be used
