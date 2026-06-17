@@ -36,7 +36,6 @@ from ...utils.tensor_backper import TensorBackuper
 from ..training_utils.data import DataIterator, get_data_iterator, get_rollout_data, sync_actor_critic_data
 from ..training_utils.log_utils import log_cpu_memory, log_perf_data, log_rollout_data
 from ..training_utils.loss import (
-    _log_train_advantage_computation_event,
     compute_advantages_and_returns,
     get_log_probs_and_entropy,
     get_values,
@@ -465,7 +464,6 @@ class MegatronTrainRayActor(TrainRayActor):
                 # Calculate adv and returns. Need to performed before training (instead of on the fly),
                 # because we may need normalize the whole rollout.
                 compute_advantages_and_returns(self.args, rollout_data)
-                _log_train_advantage_computation_event(rollout_data)
 
             if self.rollout_data_postprocess is not None:
                 self.rollout_data_postprocess(self.args)
