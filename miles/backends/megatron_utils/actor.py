@@ -326,7 +326,6 @@ class MegatronTrainRayActor(TrainRayActor):
         witness_info: WitnessInfo | None,
         attempt: int,
     ) -> TrainStepOutcome:
-        self._heartbeat.bump()
         self._last_rollout_id = rollout_id
         if self.args.offload_train:
             self.wake_up()
@@ -373,7 +372,6 @@ class MegatronTrainRayActor(TrainRayActor):
             attempt=0,
         )
 
-        self._heartbeat.bump()
         return train_step_outcome
 
     def _use_rollout_replay(self, m) -> bool:
@@ -505,12 +503,10 @@ class MegatronTrainRayActor(TrainRayActor):
 
         log_perf_data(rollout_id, self.args)
 
-        self._heartbeat.bump()
         return train_step_outcome
 
     @timer
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
-        self._heartbeat.bump()
         if self.args.debug_rollout_only:
             return
 
@@ -538,7 +534,6 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @timer
     def update_weights(self, info: "EnginesAndLock") -> None:
-        self._heartbeat.bump()
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
 
