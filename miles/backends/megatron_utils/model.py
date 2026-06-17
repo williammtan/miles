@@ -28,7 +28,6 @@ from miles.backends.megatron_utils.types import TrainStepOutcome
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.memory_utils import clear_memory
 from miles.utils.structured_log import log_structured
-from miles.utils.test_utils.ft_test_actions import FTTestActionActorExecutor
 from miles.utils.witness.allocator import WitnessInfo
 
 from ..training_utils.ci_utils import check_grad_norm, check_kl
@@ -346,7 +345,6 @@ def train_one_step(
     num_microbatches: int,
     witness_info: WitnessInfo | None,
     attempt: int,
-    ft_actor_executor: FTTestActionActorExecutor | None = None,
 ) -> tuple[dict[str, float], float, TrainStepOutcome]:
     """Execute a single pipeline-parallel training step.
 
@@ -484,9 +482,6 @@ def train_one_step(
     if parallel_state.indep_dp.size > 1:
         assert step_id == 0, "indep-dp does not support multi step per train yet"
 
-        if ft_actor_executor is not None:
-            ft_actor_executor.maybe_crash(rollout_id=rollout_id, attempt=attempt)
-
         ok, indep_dp_loss_reduced = _allreduce_grads_and_losses_across_replicas(
             args, model, parallel_state, losses_reduced=losses_reduced
         )
@@ -570,7 +565,6 @@ def train(
     num_microbatches: Sequence[int],
     witness_info: WitnessInfo | None,
     attempt: int,
-    ft_actor_executor: FTTestActionActorExecutor | None = None,
 ) -> TrainStepOutcome:
     """Run training over a rollout consisting of multiple steps.
 
@@ -670,7 +664,6 @@ def train(
             num_microbatches[step_id],
             witness_info=witness_info,
             attempt=attempt,
-            ft_actor_executor=ft_actor_executor,
         )
 
         if step_id == 0:
