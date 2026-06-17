@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import dataclasses
 import gc
 import logging
@@ -25,7 +23,6 @@ from megatron.training.training import get_model
 
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.memory_utils import clear_memory
-from miles.utils.witness.allocator import WitnessInfo
 
 from ..training_utils.ci_utils import check_grad_norm, check_kl
 from ..training_utils.data import DataIterator, get_batch
@@ -337,8 +334,6 @@ def train_one_step(
     optimizer: MegatronOptimizer | None,
     opt_param_scheduler: OptimizerParamScheduler | None,
     num_microbatches: int,
-    witness_info: WitnessInfo | None,
-    attempt: int,
 ) -> tuple[dict[str, float], float]:
     """Execute a single pipeline-parallel training step.
 
@@ -529,8 +524,6 @@ def train(
     opt_param_scheduler: OptimizerParamScheduler | None,
     data_iterator: Sequence[DataIterator],
     num_microbatches: Sequence[int],
-    witness_info: WitnessInfo | None,
-    attempt: int,
 ) -> None:
     """Run training over a rollout consisting of multiple steps.
 
@@ -626,8 +619,6 @@ def train(
             optimizer,
             opt_param_scheduler,
             num_microbatches[step_id],
-            witness_info=witness_info,
-            attempt=attempt,
         )
 
         if step_id == 0:

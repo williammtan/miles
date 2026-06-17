@@ -421,7 +421,7 @@ class FSDPTrainRayActor(TrainRayActor):
             self.wake_up()
 
         with inverse_timer("train_wait"), timer("train"):
-            rollout_data = get_rollout_data(self.args, rollout_data_ref, witness_info=None)
+            rollout_data = get_rollout_data(self.args, rollout_data_ref)
             if self.args.debug_rollout_only:
                 return
             self._train_core(rollout_id=rollout_id, rollout_data=rollout_data)

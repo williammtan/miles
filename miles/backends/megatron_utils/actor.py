@@ -25,7 +25,6 @@ from miles.utils.replay_base import all_replay_managers, routing_replay_manager
 from miles.utils.timer import Timer, inverse_timer, timer
 from miles.utils.tracking_utils import init_tracking
 from miles.utils.types import RolloutBatch
-from miles.utils.witness.allocator import WitnessInfo
 
 from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
@@ -281,19 +280,13 @@ class MegatronTrainRayActor(TrainRayActor):
                 store_prefix=store_prefix,
             )
 
-    def train(
-        self,
-        rollout_id: int,
-        rollout_data_ref: Box,
-        witness_info: WitnessInfo | None,
-        attempt: int,
-    ) -> None:
+    def train(self, rollout_id: int, rollout_data_ref: Box) -> None:
         self._last_rollout_id = rollout_id
         if self.args.offload_train:
             self.wake_up()
 
         with timer("data_preprocess"):
-            rollout_data = get_rollout_data(self.args, rollout_data_ref, witness_info=witness_info)
+            rollout_data = get_rollout_data(self.args, rollout_data_ref)
             if self.args.debug_rollout_only:
                 log_rollout_data(rollout_id, self.args, rollout_data)
                 return
@@ -301,7 +294,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.role == "critic":
             return self.train_critic(rollout_id, rollout_data)
         else:
-            return self.train_actor(rollout_id, rollout_data, witness_info=witness_info, attempt=attempt)
+            return self.train_actor(rollout_id, rollout_data)
 
     def train_critic(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
         # Create data iterator for log_probs and train.
@@ -329,16 +322,12 @@ class MegatronTrainRayActor(TrainRayActor):
             self.opt_param_scheduler,
             data_iterator,
             num_microbatches,
-            witness_info=None,
-            attempt=0,
         )
 
     def _use_rollout_replay(self, m) -> bool:
         return getattr(self.args, f"use_rollout_{m.name}_replay", False)
 
-    def train_actor(
-        self, rollout_id: int, rollout_data: RolloutBatch, *, witness_info: WitnessInfo | None, attempt: int
-    ) -> None:
+    def train_actor(self, rollout_id: int, rollout_data: RolloutBatch) -> None:
         # Create data iterator for log_probs and train.
         data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
 
@@ -427,8 +416,6 @@ class MegatronTrainRayActor(TrainRayActor):
                     self.opt_param_scheduler,
                     data_iterator,
                     num_microbatches,
-                    witness_info=witness_info,
-                    attempt=attempt,
                 )
 
             self.prof.step(rollout_id=rollout_id)
