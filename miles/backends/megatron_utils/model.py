@@ -714,8 +714,6 @@ def save(
     model: Sequence[DDP],
     optimizer: MegatronOptimizer | None,
     opt_param_scheduler: OptimizerParamScheduler | None,
-    checkpointing_context: dict | None = None,
-    non_persistent_ckpt: bool = False,
 ) -> None:
     """Persist a training checkpoint safely with forward hooks disabled.
 
@@ -724,9 +722,6 @@ def save(
         model (Sequence[DDP]): Sequence of DDP-wrapped model chunks.
         optimizer (MegatronOptimizer): Optimizer instance.
         opt_param_scheduler (OptimizerParamScheduler): LR/WD scheduler.
-        checkpointing_context (dict | None): Context passed to Megatron's save_checkpoint
-            (e.g. ``{'local_checkpoint_manager': manager}`` for in-memory checkpoints).
-        non_persistent_ckpt (bool): If True, save a non-persistent (in-memory) checkpoint.
     """
     args = get_args()
     hashes = None
@@ -744,10 +739,9 @@ def save(
             optimizer,
             opt_param_scheduler,
             num_floating_point_operations_so_far=0,
+            checkpointing_context=None,
             train_data_iterator=None,
             preprocess_common_state_dict_fn=None,
-            checkpointing_context=checkpointing_context,
-            non_persistent_ckpt=non_persistent_ckpt,
         )
 
     if hashes is not None:
@@ -814,16 +808,13 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
 
 
 def initialize_model_and_optimizer(
-    args: Namespace,
-    role: str = "actor",
-    checkpointing_context=None,
+    args: Namespace, role: str = "actor"
 ) -> tuple[list[DDP], MegatronOptimizer | None, OptimizerParamScheduler | None, int]:
     """Initialize model(s), optimizer, scheduler, and load from checkpoint.
 
     Args:
         args (Namespace): Runtime arguments.
         role (str): Logical role of the model (e.g., "actor", "critic").
-        checkpointing_context: pass-through checkpointing context
 
     Returns:
         tuple[list[DDP], MegatronOptimizer, OptimizerParamScheduler, int]:
@@ -844,7 +835,7 @@ def initialize_model_and_optimizer(
         model,
         optimizer,
         opt_param_scheduler,
-        checkpointing_context=checkpointing_context,
+        checkpointing_context={},
         skip_load_to_model_and_opt=False,
     )
     check_peak_gpu_memory_after_load(args)

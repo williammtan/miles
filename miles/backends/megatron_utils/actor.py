@@ -40,7 +40,6 @@ from ..training_utils.loss import (
 from ..training_utils.parallel import get_parallel_state
 from ..training_utils.replay_data import fill_replay_data, register_replay_list_sequential
 from .checkpoint import load_checkpoint
-from .in_memory_checkpoint import InMemoryCheckpointManager
 from .initialize import init, is_megatron_main_rank
 from .lora_utils import is_lora_enabled
 from .model import forward_only, initialize_model_and_optimizer, save, train
@@ -136,12 +135,8 @@ class MegatronTrainRayActor(TrainRayActor):
                 m.enabled = getattr(self.args, f"use_{m.name}_replay", False)
                 m.enable_check_replay_result = m.enabled and self.args.ci_test
 
-        checkpointing_context = None
-        if args.non_persistent_ckpt_type == "local":
-            checkpointing_context = {"local_checkpoint_manager": InMemoryCheckpointManager()}
-
-        (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = initialize_model_and_optimizer(
-            args, role, checkpointing_context=checkpointing_context
+        self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id = initialize_model_and_optimizer(
+            args, role
         )
 
         parallel_state = get_parallel_state()
