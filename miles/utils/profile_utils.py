@@ -72,8 +72,8 @@ def _create_torch_profiler(args, name):
             use_gzip=True,
         ),
         record_shapes=True,
-        with_stack=True,
-        profile_memory=True,
+        with_stack=False,  # off: with_stack on a Megatron step makes multi-GB/rank traces
+        profile_memory=False,  # off: not needed for the kernel wall-clock breakdown; avoids OOM risk
         with_flops=True,
     )
 

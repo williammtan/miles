@@ -210,6 +210,20 @@ spec:
               value: "1"
             - name: MEGATRON_PATH
               value: /root/Megatron-LM
+            - name: WANDB_PROJECT
+              value: "osmosis-testing"
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef: { name: wandb, key: WANDB_API_KEY, optional: true }
+            # 2-step pytorch profiler on the resumed run (rank 0; remove USE_PROFILER to disable).
+            - name: USE_PROFILER
+              value: "1"
+            - name: PROFILE_STEP_START
+              value: "4"
+            - name: PROFILE_STEP_END
+              value: "6"
+            - name: TENSORBOARD_DIR
+              value: "/weka/profiling-traces"
             - name: HF_TOKEN
               valueFrom:
                 secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true }

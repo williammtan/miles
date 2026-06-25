@@ -153,11 +153,15 @@ OPTIMIZER_ARGS=(
    --use-precision-aware-optimizer
 )
 
-WANDB_ARGS=(
-   # --use-wandb
-   # --wandb-project miles-opd
-   # --wandb-group qwen3.6-35B-A3B-glm5.2-cross-tokenizer
-)
+# Enable wandb automatically when a key is present (WANDB_API_KEY env, read by wandb.init).
+WANDB_ARGS=()
+if [ -n "${WANDB_API_KEY:-}" ]; then
+   WANDB_ARGS=(
+      --use-wandb
+      --wandb-project "${WANDB_PROJECT:-osmosis-testing}"
+      --wandb-group "${WANDB_GROUP:-qwen3.6-35B-A3B-glm5.2-cross-tokenizer}"
+   )
+fi
 
 SGLANG_ARGS=(
    --rollout-num-gpus-per-engine 8
@@ -174,6 +178,20 @@ MISC_ARGS=(
    --attention-backend flash
    --moe-token-dispatcher-type flex
 )
+
+# Optional 2-step pytorch profiler (kernel-level breakdown of the training step).
+# Enable with USE_PROFILER=1; profiles steps [START,END) after a warmup (rank 0 only).
+PROFILE_ARGS=()
+if [ -n "${USE_PROFILER:-}" ]; then
+   PROFILE_ARGS=(
+      --use-pytorch-profiler
+      --profile-target train_overall
+      --profile-step-start "${PROFILE_STEP_START:-4}"
+      --profile-step-end "${PROFILE_STEP_END:-6}"
+      --profile-ranks 0
+      --tensorboard-dir "${TENSORBOARD_DIR:-/weka/profiling-traces}"
+   )
+fi
 
 # launch the master node of ray in container
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
@@ -203,7 +221,8 @@ ray job submit --address="http://127.0.0.1:8265" \
    "${PERF_ARGS[@]}" \
    "${EVAL_ARGS[@]}" \
    "${SGLANG_ARGS[@]}" \
-   "${MISC_ARGS[@]}"
+   "${MISC_ARGS[@]}" \
+   "${PROFILE_ARGS[@]}"
 
 # clear after training
 pkill -9 sglang || true
