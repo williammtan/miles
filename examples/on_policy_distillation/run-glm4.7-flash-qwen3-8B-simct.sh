@@ -63,6 +63,11 @@ if [ -n "${PIN_TRANSFORMERS:-}" ]; then
     pip install -q "${PIN_TRANSFORMERS}" || true
 fi
 
+# GLM-4.7-Flash ships a tiktoken/sentencepiece-based tokenizer; the image may lack
+# the converters needed to build the fast tokenizer. These are additive deps (no
+# version conflict with sglang/megatron).
+python3 -c "import tiktoken, sentencepiece" 2>/dev/null || pip install -q tiktoken sentencepiece || true
+
 # Download the teacher if a local dir was requested but is not present.
 if [[ "${TEACHER_MODEL}" == /* && ! -e "${TEACHER_MODEL}/config.json" ]]; then
     echo "Downloading ${TEACHER_HF_REPO} -> ${TEACHER_MODEL} ..."
