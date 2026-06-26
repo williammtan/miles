@@ -54,9 +54,14 @@ RM_URL="http://127.0.0.1:${TEACHER_PORT}/generate"
 NUM_STUDENT_GPUS=$(awk -F, '{print NF}' <<<"${STUDENT_GPUS}")
 NUM_TEACHER_GPUS=$(awk -F, '{print NF}' <<<"${TEACHER_GPUS}")
 
-# GLM-4.7-Flash needs a recent transformers (its modeling code). Pin the version
-# from examples/p2p_weight_transfer/prepare-glm4.7-flash.sh. Idempotent.
-pip install -q "git+https://github.com/huggingface/transformers.git@76732b4e7120808ff989edbd16401f61fa6a0afa" || true
+# NOTE: GLM-4.7-Flash modeling code needs a recent transformers. The miles image
+# already ships a recent transformers (5.6.x, pinned by sglang) that supports it;
+# do NOT downgrade to the older prepare-glm4.7-flash.sh commit, which conflicts
+# with the image's sglang/megatron. Override with PIN_TRANSFORMERS=<spec> only if
+# serving fails on an unknown GLM-4.7-Flash model class.
+if [ -n "${PIN_TRANSFORMERS:-}" ]; then
+    pip install -q "${PIN_TRANSFORMERS}" || true
+fi
 
 # Download the teacher if a local dir was requested but is not present.
 if [[ "${TEACHER_MODEL}" == /* && ! -e "${TEACHER_MODEL}/config.json" ]]; then
