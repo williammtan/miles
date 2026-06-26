@@ -1,0 +1,264 @@
+# Cross-tokenizer on-policy distillation on Kubernetes:
+#   GLM5.2 teacher  ->  Qwen3.6-35B-A3B student.
+#
+# TOPOLOGY (the runnable, primary artifact): TWO nodes, one role each.
+#   * will-glm52-teacher  Deployment + Service: SGLang server for the 744B-A40B
+#     GLM5.2 teacher on one 8xH200 node (TP=8, FP8, intra-node NVLink). Queried for
+#     per-token logprobs only (max_new_tokens=0), so it never generates.
+#   * will-qwen36-trainer Job: the Qwen3.6-35B-A3B student, colocated train+rollout
+#     on the OTHER 8xH200 node (EP=8). Reaches the teacher over HTTP at
+#     http://will-glm52-teacher:30000/generate.
+#
+# WHY TWO NODES (not single-Pod/two-container): a 744B-A40B teacher needs a whole
+# 8xH200 node to serve and the 35B-A3B student needs a whole node to train+roll out,
+# so 8+8 GPUs cannot co-fit on one 8-GPU node. The two roles only exchange HTTP
+# scoring requests over the pod network, so each role is single-node internally
+# (NVLink) and NO RDMA/IB or multi-node NCCL is required.
+#
+# Scheduling: priorityClassName skypilot-high-priority (preempts lower-priority GPU
+# pods) so the two nodes get allocated on a busy cluster.
+#
+# Storage: reuses the RWX `weka-data` PVC (32Ti) for the HF cache, model weights,
+# the torch_dist checkpoint, run checkpoints, AND the staged feature-branch code at
+# /weka/code/miles (pre-staged so no GitHub push is needed; falls back to git clone).
+#
+# Smoke-then-full: the trainer honors NUM_ROLLOUT — set it small (e.g. 3) for a
+# wiring smoke, then re-apply with the default for the full run.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: will-glm52-teacher
+  labels: { app: will-glm52-teacher }
+spec:
+  selector: { app: will-glm52-teacher }
+  # The teacher's readiness can lag (slow model load + DSA warmup); publish its address
+  # so the trainer can reach it as soon as the bridge is up.
+  publishNotReadyAddresses: true
+  ports:
+    - name: http
+      port: 30000
+      targetPort: 30000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: will-glm52-teacher
+  labels: { app: will-glm52-teacher }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: will-glm52-teacher }
+  template:
+    metadata:
+      labels: { app: will-glm52-teacher }
+    spec:
+      restartPolicy: Always
+      priorityClassName: skypilot-high-priority
+      # Keep the teacher and trainer on different nodes (each wants a full 8-GPU node).
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: will-qwen36-trainer }
+              topologyKey: kubernetes.io/hostname
+      volumes:
+        - name: weka
+          persistentVolumeClaim: { claimName: weka-data }
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 64Gi }
+      containers:
+        - name: teacher
+          image: radixark/miles:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TEACHER_MODEL
+              value: "zai-org/GLM-5.2-FP8"       # pre-quantized block-FP8 (~750GB); loads ~94GB/GPU on 8xH200
+            - name: POD_IP
+              valueFrom:
+                fieldRef: { fieldPath: status.podIP }
+            - name: HF_HOME
+              value: /weka/hf
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true }
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -ex
+              MODEL_DIR=/weka/models/glm5.2-fp8
+              if [ ! -e "$MODEL_DIR/config.json" ]; then
+                hf download "$TEACHER_MODEL" --local-dir "$MODEL_DIR"
+              fi
+              # Pre-quantized block-FP8 (config has quant_method=fp8, weight_block_size
+              # [128,128]); SGLang auto-detects it and loads FP8 directly (~94GB/GPU), so no
+              # --quantization flag (online fp8 would load bf16 first and OOM). glm_moe_dsa
+              # (DeepSeek-V3.2-style DSA) attention is handled by SGLang's native loader.
+              # GLM-5.2 (glm_moe_dsa, DSA cross-layer index sharing) serving config, ported
+              # from the validated launcher scripts/run_glm5_2_744b_a40b.py (support-glm5.2):
+              # DP-attention + EP, NSA attention with nsa-decode-backend=flashmla_kv (NOT
+              # flashmla_sparse, which mis-slices the 192-dim heads), fp8_e4m3 KV cache, and
+              # chunked-prefill 16384. --skip-server-warmup since real OPD scoring is short.
+              # SGLang under --enable-dp-attention binds the HTTP server to 127.0.0.1
+              # (ignores --host), so run it in the background and bridge $POD_IP:30000 -> it
+              # so the Service / cross-node trainer can reach it.
+              python3 -m sglang.launch_server \
+                --model-path "$MODEL_DIR" \
+                --tp 8 \
+                --dp-size 8 \
+                --enable-dp-attention \
+                --ep-size 8 \
+                --moe-dense-tp-size 1 \
+                --enable-dp-lm-head \
+                --attention-backend nsa \
+                --nsa-prefill-backend flashmla_sparse \
+                --nsa-decode-backend flashmla_kv \
+                --kv-cache-dtype fp8_e4m3 \
+                --page-size 64 \
+                --chunked-prefill-size 16384 \
+                --mem-fraction-static 0.85 \
+                --max-running-requests 512 \
+                --watchdog-timeout 3600 \
+                --skip-server-warmup \
+                --trust-remote-code &
+              exec python3 -c '
+              import socket, threading, os
+              listen = (os.environ["POD_IP"], 30000); dest = ("127.0.0.1", 30000)
+              def pipe(a, b):
+               try:
+                while True:
+                 d = a.recv(65536)
+                 if not d: break
+                 b.sendall(d)
+               except Exception: pass
+              def handle(c):
+               try: u = socket.create_connection(dest)
+               except Exception: c.close(); return
+               threading.Thread(target=pipe, args=(c, u), daemon=True).start()
+               threading.Thread(target=pipe, args=(u, c), daemon=True).start()
+              s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+              s.bind(listen); s.listen(512)
+              print("teacher bridge", listen, "->", dest, flush=True)
+              while True:
+               c, _ = s.accept(); threading.Thread(target=handle, args=(c,), daemon=True).start()
+              '
+          ports:
+            - containerPort: 30000
+          # /health (not /health_generate, which runs a slow generation and times out the
+          # 1s default probe) with a generous timeout while the model loads + warms up.
+          readinessProbe:
+            httpGet: { path: /health, port: 30000 }
+            initialDelaySeconds: 120
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 240
+          resources:
+            limits:
+              nvidia.com/gpu: "8"
+              cpu: "32"
+              memory: 512Gi
+          volumeMounts:
+            - { name: weka, mountPath: /weka }
+            - { name: dshm, mountPath: /dev/shm }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: will-qwen3-8b-simct-trainer
+  labels: { app: will-qwen36-trainer }
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: { app: will-qwen36-trainer }
+    spec:
+      restartPolicy: Never
+      priorityClassName: skypilot-high-priority
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels: { app: will-glm52-teacher }
+              topologyKey: kubernetes.io/hostname
+      volumes:
+        - name: weka
+          persistentVolumeClaim: { claimName: weka-data }
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 128Gi }
+      containers:
+        - name: trainer
+          image: radixark/miles:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: STUDENT_MODEL_ID
+              value: "Qwen/Qwen3-8B"
+            - name: TEACHER_TOKENIZER
+              value: "zai-org/GLM-5.2-FP8"         # tokenizer == GLM-5.2; only tokenizer files pulled
+            - name: RM_URL
+              value: "http://will-glm52-teacher:30000/generate"
+            - name: NUM_ROLLOUT
+              value: "3"                           # SMOKE: a few rollout steps to validate wiring
+            - name: GIT_REPO
+              value: "https://github.com/williammtan/miles"
+            - name: GIT_REF
+              value: "feat/cross-tokenizer-opd-v2"
+            - name: HF_HOME
+              value: /weka/hf
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: MEGATRON_PATH
+              value: /root/Megatron-LM
+            - name: WANDB_PROJECT
+              value: "osmosis-testing"
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef: { name: wandb, key: WANDB_API_KEY, optional: true }
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true }
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -ex
+              CODE_DIR=/weka/code/miles-v2
+              # Prefer pre-staged code (no GitHub push needed); else clone the branch.
+              if [ ! -f "$CODE_DIR/setup.py" ]; then
+                git clone "$GIT_REPO" "$CODE_DIR" && cd "$CODE_DIR" && git checkout "$GIT_REF"
+              fi
+              cd "$CODE_DIR"
+              # --no-deps: install our code editable without re-resolving the image's
+              # pinned sglang/megatron/torch (a full resolve breaks SGLang's kernel match).
+              pip install -e . --no-deps >/dev/null 2>&1 || true
+
+              STUDENT_DIR=/weka/Qwen3-8B
+              if [ ! -e "$STUDENT_DIR/config.json" ]; then
+                hf download "$STUDENT_MODEL_ID" --local-dir "$STUDENT_DIR"
+              fi
+              export STUDENT_MODEL="$STUDENT_DIR"
+              export STUDENT_TORCH_DIST=/weka/Qwen3-8B_torch_dist
+              export DATA_PATH=/weka/data/dapo-math-17k/dapo-math-17k.jsonl
+              if [ ! -e "$DATA_PATH" ]; then
+                hf download --repo-type dataset zhuzilin/dapo-math-17k --local-dir /weka/data/dapo-math-17k
+              fi
+
+              # Waits for the teacher's /health_generate, converts the student to
+              # torch_dist if needed, then launches colocated train+rollout.
+              exec bash examples/on_policy_distillation/run-qwen3-8B-glm5.2-simct.sh
+          resources:
+            limits:
+              nvidia.com/gpu: "8"
+              cpu: "64"
+              memory: 1024Gi
+          volumeMounts:
+            - { name: weka, mountPath: /weka }
+            - { name: dshm, mountPath: /dev/shm }
+#
+# ---------------------------------------------------------------------------
+# SINGLE-POD, TWO-CONTAINER VARIANT (only if the teacher co-fits on one node):
+# Replace the Deployment+Service+Job above with one Pod whose `teacher` and
+# `trainer` containers share /dev/shm and the PVC; the trainer then uses
+# RM_URL=http://localhost:30000/generate. This needs teacher_gpus + student_gpus
+# <= 8, so it is NOT usable for the 744B GLM5.2 teacher — only for a small teacher.
+# ---------------------------------------------------------------------------

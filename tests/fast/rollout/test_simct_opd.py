@@ -132,6 +132,7 @@ async def test_reward_func_end_to_end(monkeypatch):
         sglang_router_port=1234,
         opd_ct_candidate_k=20,
         opd_ct_max_continuation_len=4,
+        reward_key=None,
     )
 
     response_text = "happy"
