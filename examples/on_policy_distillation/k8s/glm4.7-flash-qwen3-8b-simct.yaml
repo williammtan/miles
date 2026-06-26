@@ -1,0 +1,64 @@
+# SimCT cross-tokenizer OPD, COLOCATED on a SINGLE node:
+#   GLM-4.7-Flash teacher (small MoE) + Qwen3-8B student on one 8xH200 node.
+# The teacher SGLang server and the student trainer+rollout share the node, so
+# only ONE GPU node is needed (no 2-node anti-affinity). Honors NUM_ROLLOUT
+# (small = smoke). Weights/data/checkpoints persist on the weka PVC.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: will-glm47-flash-simct-trainer
+  labels: { app: will-glm47-flash-simct-trainer }
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels: { app: will-glm47-flash-simct-trainer }
+    spec:
+      restartPolicy: Never
+      priorityClassName: skypilot-high-priority
+      volumes:
+        - name: weka
+          persistentVolumeClaim: { claimName: weka-data }
+        - name: dshm
+          emptyDir: { medium: Memory, sizeLimit: 128Gi }
+      containers:
+        - name: trainer
+          image: radixark/miles:dev-202606021333
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NUM_ROLLOUT
+              value: "3"                           # SMOKE: a few rollout steps
+            - name: GIT_REPO
+              value: "https://github.com/williammtan/miles"
+            - name: GIT_REF
+              value: "feat/cross-tokenizer-opd-v2"
+            - name: HF_HOME
+              value: /workspace/hf
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: MEGATRON_PATH
+              value: /root/Megatron-LM
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef: { name: hf-token, key: HF_TOKEN, optional: true }
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -ex
+              CODE_DIR=/workspace/code/miles-v2
+              if [ ! -f "$CODE_DIR/setup.py" ]; then
+                git clone "$GIT_REPO" "$CODE_DIR" && cd "$CODE_DIR" && git checkout "$GIT_REF"
+              else
+                cd "$CODE_DIR" && git fetch origin "$GIT_REF" && git checkout "$GIT_REF" && git reset --hard "origin/$GIT_REF"
+              fi
+              pip install -e . --no-deps >/dev/null 2>&1 || true
+              # Teacher (GLM-4.7-Flash) + Qwen3-8B student colocated on this 8-GPU node.
+              exec bash examples/on_policy_distillation/run-glm4.7-flash-qwen3-8B-simct.sh
+          resources:
+            limits:
+              nvidia.com/gpu: "8"
+              cpu: "64"
+              memory: 1024Gi
+          volumeMounts:
+            - { name: weka, mountPath: /workspace }
+            - { name: dshm, mountPath: /dev/shm }
