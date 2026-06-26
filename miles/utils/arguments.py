@@ -1176,6 +1176,31 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Leave unset for the standard shared-tokenizer OPD path."
                 ),
             )
+            parser.add_argument(
+                "--opd-ct-method",
+                type=str,
+                choices=["dpca", "simct"],
+                default="dpca",
+                help=(
+                    "Cross-tokenizer OPD method (requires --opd-teacher-tokenizer). "
+                    "'dpca': DP chunk-alignment of the realized token sequences (arXiv 2606.09456), "
+                    "via miles.rollout.cross_tokenizer_opd. "
+                    "'simct': common text-unit supervision space with top-k candidates and "
+                    "continuation scoring (arXiv 2605.07711), via miles.rollout.simct_opd."
+                ),
+            )
+            parser.add_argument(
+                "--opd-ct-candidate-k",
+                type=int,
+                default=20,
+                help="SimCT: top-k per side feeding the candidate union (also the rollout top_logprobs_num).",
+            )
+            parser.add_argument(
+                "--opd-ct-max-continuation-len",
+                type=int,
+                default=4,
+                help="SimCT: max tokens used to realize a candidate text unit on the other tokenizer.",
+            )
             return parser
 
         def add_lora_arguments(parser):
@@ -2125,11 +2150,12 @@ def miles_validate_args(args):
                     "--opd-teacher-tokenizer (cross-tokenizer OPD) is only supported with "
                     "--opd-type=sglang, since the teacher must be a separate SGLang server."
                 )
-            if args.opd_log_prob_top_k > 0:
+            if args.opd_ct_method == "dpca" and args.opd_log_prob_top_k > 0:
                 raise ValueError(
-                    "--opd-teacher-tokenizer (cross-tokenizer OPD) cannot be combined with "
-                    "--opd-log-prob-top-k>0; top-k token-set matching requires a shared tokenizer. "
-                    "Set --opd-log-prob-top-k=0 to use the sampled-token (DPCA) cross-tokenizer path."
+                    "--opd-teacher-tokenizer with --opd-ct-method=dpca cannot be combined with "
+                    "--opd-log-prob-top-k>0; token-id top-k matching requires a shared tokenizer. "
+                    "Set --opd-log-prob-top-k=0, or use --opd-ct-method=simct (text-unit top-k is "
+                    "cross-tokenizer safe and uses --opd-ct-candidate-k instead)."
                 )
 
         if args.opd_type == "megatron":

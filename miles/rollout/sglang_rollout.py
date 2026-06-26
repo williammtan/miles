@@ -169,8 +169,14 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     }
     opd_top_k = getattr(args, "opd_log_prob_top_k", 0) or 0
     opd_top_k_strategy = getattr(args, "opd_top_k_strategy", "only-student")
-    if getattr(args, "use_opd", False) and opd_top_k > 0 and opd_top_k_strategy != "only-teacher":
-        payload["top_logprobs_num"] = opd_top_k
+    opd_simct = getattr(args, "use_opd", False) and getattr(args, "opd_ct_method", "dpca") == "simct"
+    capture_student_top = getattr(args, "use_opd", False) and (
+        (opd_top_k > 0 and opd_top_k_strategy != "only-teacher") or opd_simct
+    )
+    if capture_student_top:
+        payload["top_logprobs_num"] = (
+            int(getattr(args, "opd_ct_candidate_k", 20) or 20) if opd_simct else opd_top_k
+        )
 
     if is_lora_enabled(args):
         payload["lora_path"] = LORA_ADAPTER_NAME
@@ -198,7 +204,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         headers = {"X-SMG-Routing-Key": sample.session_id}
 
     output = await post(url, payload, headers=headers)
-    if getattr(args, "use_opd", False) and opd_top_k > 0 and opd_top_k_strategy != "only-teacher":
+    if capture_student_top:
         output_top_logprobs = output.get("meta_info", {}).get("output_top_logprobs")
         if output_top_logprobs is not None:
             sample.metadata.setdefault("opd_student_top_logprobs", [])
