@@ -1201,6 +1201,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=4,
                 help="SimCT: max tokens used to realize a candidate text unit on the other tokenizer.",
             )
+            parser.add_argument(
+                "--opd-ct-max-positions",
+                type=int,
+                default=0,
+                help=(
+                    "SimCT: cap the number of aligned positions scored per sample (evenly "
+                    "subsampled) to bound teacher/student continuation-scoring requests. "
+                    "0 = score all aligned positions."
+                ),
+            )
             return parser
 
         def add_lora_arguments(parser):

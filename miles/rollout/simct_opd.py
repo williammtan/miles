@@ -214,6 +214,15 @@ async def reward_func(args: Namespace, sample: Sample, **kwargs: Any) -> dict[st
     if not aligned:
         return {"ctopd_reverse_kl": [0.0] * response_length}
 
+    # Bound continuation-scoring cost: cap the number of aligned positions scored per
+    # sample (evenly subsampled). 0 = score all. Unscored positions are masked to 0.
+    max_positions = int(getattr(args, "opd_ct_max_positions", 0) or 0)
+    if max_positions > 0 and len(aligned) > max_positions:
+        ts = sorted(aligned)
+        step = len(ts) / max_positions
+        keep = {ts[int(i * step)] for i in range(max_positions)}
+        aligned = {t: j for t, j in aligned.items() if t in keep}
+
     student_top = sample.metadata.get("opd_student_top_logprobs")
     if student_top is None:
         raise ValueError(

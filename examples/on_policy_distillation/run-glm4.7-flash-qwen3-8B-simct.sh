@@ -44,8 +44,9 @@ TEACHER_GPUS="${TEACHER_GPUS:-6,7}"
 STUDENT_GPUS="${STUDENT_GPUS:-0,1,2,3,4,5}"
 DATA_PATH="${DATA_PATH:-/workspace/dapo-math-17k/dapo-math-17k.jsonl}"
 NUM_ROLLOUT="${NUM_ROLLOUT:-3}"
-CANDIDATE_K="${CANDIDATE_K:-20}"
+CANDIDATE_K="${CANDIDATE_K:-6}"
 MAX_CONT_LEN="${MAX_CONT_LEN:-4}"
+MAX_POSITIONS="${MAX_POSITIONS:-16}"
 OPD_KL_COEF="${OPD_KL_COEF:-1.0}"
 MEGATRON_PATH="${MEGATRON_PATH:-/root/Megatron-LM}"
 TEACHER_PORT="${TEACHER_PORT:-30000}"
@@ -123,14 +124,15 @@ ROLLOUT_ARGS=(
    --apply-chat-template
    --rollout-shuffle
    --num-rollout "${NUM_ROLLOUT}"
-   # Student runs on 6 GPUs at TP=2 -> data-parallel=3, so the global batch must be
-   # divisible by 3: 12 prompts x 8 samples = 96.
-   --rollout-batch-size 12
+   # POC smoke kept small to bound SimCT continuation-scoring cost. Student runs on
+   # 6 GPUs at TP=2 -> data-parallel=3, so the global batch must be divisible by 3:
+   # 3 prompts x 8 samples = 24.
+   --rollout-batch-size 3
    --n-samples-per-prompt 8
-   --rollout-max-response-len 8192
+   --rollout-max-response-len 1024
    --rollout-temperature 1.0
 
-   --global-batch-size 96
+   --global-batch-size 24
    --balance-data
 )
 
@@ -158,6 +160,7 @@ GRPO_ARGS=(
    --opd-ct-method simct
    --opd-ct-candidate-k "${CANDIDATE_K}"
    --opd-ct-max-continuation-len "${MAX_CONT_LEN}"
+   --opd-ct-max-positions "${MAX_POSITIONS}"
    --use-kl-loss
    --kl-loss-coef 0.00
    --kl-loss-type low_var_kl
