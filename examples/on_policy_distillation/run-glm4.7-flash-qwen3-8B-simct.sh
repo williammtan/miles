@@ -68,9 +68,11 @@ fi
 # version conflict with sglang/megatron).
 python3 -c "import tiktoken, sentencepiece" 2>/dev/null || pip install -q tiktoken sentencepiece || true
 
-# Download the teacher if a local dir was requested but is not present.
-if [[ "${TEACHER_MODEL}" == /* && ! -e "${TEACHER_MODEL}/config.json" ]]; then
-    echo "Downloading ${TEACHER_HF_REPO} -> ${TEACHER_MODEL} ..."
+# Download the teacher into a local dir. Always invoke hf download (it resumes and
+# fetches any missing files) -- a partial earlier download can leave config.json
+# present but tokenizer files missing, which a presence-guard would wrongly skip.
+if [[ "${TEACHER_MODEL}" == /* ]]; then
+    echo "Ensuring complete download ${TEACHER_HF_REPO} -> ${TEACHER_MODEL} ..."
     hf download "${TEACHER_HF_REPO}" --local-dir "${TEACHER_MODEL}"
 fi
 
