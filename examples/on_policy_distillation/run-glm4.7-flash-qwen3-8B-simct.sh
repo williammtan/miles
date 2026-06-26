@@ -123,12 +123,14 @@ ROLLOUT_ARGS=(
    --apply-chat-template
    --rollout-shuffle
    --num-rollout "${NUM_ROLLOUT}"
-   --rollout-batch-size 16
+   # Student runs on 6 GPUs at TP=2 -> data-parallel=3, so the global batch must be
+   # divisible by 3: 12 prompts x 8 samples = 96.
+   --rollout-batch-size 12
    --n-samples-per-prompt 8
    --rollout-max-response-len 8192
    --rollout-temperature 1.0
 
-   --global-batch-size 128
+   --global-batch-size 96
    --balance-data
 )
 
