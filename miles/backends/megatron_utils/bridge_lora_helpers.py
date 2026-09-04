@@ -163,6 +163,11 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
         provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
     if hasattr(provider, "dsa_attention_backend"):
         provider.dsa_attention_backend = getattr(args, "dsa_attention_backend", "megatron")
+    # The provider takes mtp_num_layers from the HF config (mtp_num_hidden_layers),
+    # so --mtp-num-layers never reached the bridge path and MTP was always built.
+    # Its loss derives labels from input_ids, folding an unintended next-next-token
+    # term into the RL gradient, and its CE allocates fp32 [tokens, vocab/TP] logits.
+    provider.mtp_num_layers = getattr(args, "mtp_num_layers", None) or None
     provider.finalize()
 
     if is_multi_lora_enabled(args):
