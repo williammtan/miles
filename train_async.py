@@ -12,7 +12,7 @@ from miles.utils.debug_utils.periodic_py_spy import maybe_start_periodic_pyspy_d
 from miles.utils.ft_utils.control_server.server import start_control_server
 from miles.utils.ft_utils.mini_ft_controller import maybe_start_mini_ft_controller
 from miles.utils.logging_utils import configure_logger
-from miles.utils.misc import should_run_periodic_action
+from miles.utils.misc import should_run_eval, should_run_periodic_action
 from miles.utils.tracking_utils.tracking import finish_tracking, init_tracking
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,8 @@ async def train(args):
 
     eval_dispatcher = EvalDispatcher(args, actor_model, rollout_manager)
 
-    if args.eval_interval is not None and args.start_rollout_id == 0 and not args.skip_eval_before_train:
+    if (args.eval_interval is not None and args.start_rollout_id == 0
+            and not args.skip_eval_before_train and not args.eval_only_at_end):
         await eval_dispatcher.dispatch(0, hf_dir=args.hf_checkpoint)
 
     async def save_training_model(model, rollout_id, force_sync):
@@ -110,7 +111,7 @@ async def train(args):
             rollout_data_next_future = None
             await actor_model.update_weights(rollout_id=rollout_id)
 
-        if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch, args.num_rollout):
+        if should_run_eval(args, rollout_id, num_rollout_per_epoch):
             await eval_dispatcher.dispatch(rollout_id, force=rollout_id == args.num_rollout - 1)
 
         if (

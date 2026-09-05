@@ -138,6 +138,7 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.sequence_parallel = args.sequence_parallel
     provider.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size
     provider.context_parallel_size = args.context_parallel_size
+    provider.calculate_per_token_loss = args.calculate_per_token_loss
     provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
     provider.recompute_granularity = args.recompute_granularity
     provider.recompute_method = args.recompute_method
@@ -169,6 +170,8 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     # term into the RL gradient, and its CE allocates fp32 [tokens, vocab/TP] logits.
     provider.mtp_num_layers = getattr(args, "mtp_num_layers", None) or None
     provider.finalize()
+    if getattr(args, "ptd_coef", 0) > 0 and provider.calculate_per_token_loss is not True:
+        raise RuntimeError("PTD requires calculate_per_token_loss=True after LoRA provider finalization")
 
     if is_multi_lora_enabled(args):
         _validate_multi_lora_moe_support(args, provider)

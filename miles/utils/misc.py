@@ -127,6 +127,12 @@ def get_free_port(start_port=10000, consecutive=1):
     return port
 
 
+def should_run_eval(args, rollout_id: int, num_rollout_per_epoch: int | None) -> bool:
+    if args.eval_only_at_end:
+        return args.eval_interval is not None and rollout_id == args.num_rollout - 1
+    return should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch, args.num_rollout)
+
+
 def should_run_periodic_action(
     rollout_id: int,
     interval: int | None,

@@ -263,7 +263,9 @@ def get_log_probs_and_entropy(
             temperature=1.0 if args.true_on_policy_mode else args.rollout_temperature,
         )
 
-        log_probs_list.append(log_prob.squeeze(-1))
+        # Fused CE returns [R, 1]; the torch scoring path already returns [R].
+        # Preserve the response dimension when R=1 (e.g. an immediate EOS).
+        log_probs_list.append(log_prob.reshape(-1))
         if with_entropy:
             entropy_list.append(entropy)
 

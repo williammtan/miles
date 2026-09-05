@@ -18,6 +18,7 @@ from ...utils.ray_utils import Box
 from .cp_utils import slice_log_prob_with_cp, slice_with_cp
 from .mm_data import expand_multimodal_rollout_data_in_place
 from .parallel import get_parallel_state
+from miles.backends.training_utils.loss_hub.ptd import attach_ptd_normalizers
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +451,7 @@ def get_data_iterator(
         data_iterator = [
             DataIterator(rollout_data, micro_batch_indices=micro_batch_indices) for _ in range(parallel_state.vpp_size)
         ]
+        attach_ptd_normalizers(args, rollout_data, data_iterator, rollout_data["num_microbatches"])
         return data_iterator, rollout_data["num_microbatches"]
 
     dp_size = parallel_state.effective_dp.size
@@ -531,6 +533,7 @@ def get_data_iterator(
 
         data_iterator = _generate_data_iterator(rollout_data, None, micro_batch_indices)
 
+    attach_ptd_normalizers(args, rollout_data, data_iterator, num_microbatches)
     return (
         data_iterator,
         num_microbatches,

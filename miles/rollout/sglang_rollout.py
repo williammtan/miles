@@ -16,6 +16,7 @@ from tqdm import tqdm
 from miles.rollout.base_types import GenerateFnInput, RolloutFnEvalOutput, RolloutFnTrainOutput
 from miles.rollout.filter_hub.base_types import MetricGatherer, call_dynamic_filter
 from miles.rollout.inference_rollout.compatibility import load_generate_function
+from miles.rollout.ptd import collect_teacher_targets
 from miles.utils import dumper_utils
 from miles.utils.async_utils import run
 from miles.utils.data import Dataset
@@ -264,6 +265,11 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     headers = compute_routing_headers(args, sample)
 
+    if getattr(args, "ptd_coef", 0) > 0:
+        sample.metadata["ptd_media_payload"] = {
+            key: payload[key] for key in ("image_data", "audio_data", "video_data") if key in payload
+        }
+
     output = await post(url, payload, headers=headers)
     if getattr(args, "use_opd", False) and opd_top_k > 0 and opd_top_k_strategy != "only-teacher":
         output_top_logprobs = output.get("meta_info", {}).get("output_top_logprobs")
@@ -424,6 +430,10 @@ async def generate_and_rm_group(
         rewards = await batched_async_rm(args, group)
         for sample, reward in zip(group, rewards, strict=False):
             sample.reward = reward
+
+    if not evaluation and not state.aborted and getattr(args, "ptd_coef", 0) > 0:
+        samples = [s for item in group for s in (item if isinstance(item, list) else [item])]
+        await asyncio.gather(*(collect_teacher_targets(args, sample, state.tokenizer) for sample in samples))
 
     return group
 

@@ -1230,6 +1230,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
 
             # change the default value of eval_interval from Megatron to None
             reset_arg(parser, "--eval-interval", type=int, default=None)
+            parser.add_argument(
+                "--eval-only-at-end", action="store_true",
+                help="With evaluation enabled, evaluate only after the final update, ignoring epoch boundaries.",
+            )
 
             parser.add_argument(
                 "--eval-prompt-data",
@@ -1655,6 +1659,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
             OPD is orthogonal to advantage estimators and can be applied on top of
             any estimator (GRPO, PPO, etc.) by adding a KL penalty to advantages.
             """
+            parser.add_argument("--ptd-coef", type=float, default=0.0, help="PTD-PO JSD coefficient; zero preserves baseline.")
+            parser.add_argument("--ptd-top-k", type=int, default=100)
+            parser.add_argument("--ptd-hint-function-path", type=str, default=None,
+                                help="Async (args, sample) -> answer-free hint, called only for verified failed rollouts.")
+            parser.add_argument("--ptd-hint-key", type=str, default="ptd_hint")
+            parser.add_argument("--ptd-teacher-url", type=str, default=None,
+                                help="Frozen initial-model /generate endpoint; default is rollout router without LoRA.")
+            parser.add_argument("--ptd-score-timeout", type=float, default=1200.0)
+            parser.add_argument("--ptd-logits-chunk-size", type=int, default=128)
+            parser.add_argument("--ptd-vocab-size", type=int, default=None,
+                                help="Unpadded checkpoint vocabulary size, required for exact TP softmax.")
             parser.add_argument(
                 "--use-opd",
                 action="store_true",
@@ -3036,6 +3051,22 @@ def miles_validate_args(args):
                 f"ref_load {args.ref_load} does not have latest_checkpointed_iteration.txt, "
                 "please make sure it is a valid megatron checkpoint directory."
             )
+
+    if args.ptd_coef < 0:
+        raise ValueError("--ptd-coef must be nonnegative")
+    if args.ptd_coef > 0:
+        if not args.ptd_hint_function_path or not args.ptd_vocab_size:
+            raise ValueError("PTD requires --ptd-hint-function-path and --ptd-vocab-size")
+        if not 0 < args.ptd_top_k <= args.ptd_vocab_size or args.ptd_logits_chunk_size <= 0:
+            raise ValueError("PTD requires 0 < top-K <= vocabulary size and a positive chunk size")
+        if args.train_backend != "megatron" or args.context_parallel_size != 1 or args.qkv_format != "thd":
+            raise ValueError("PTD currently requires Megatron, CP=1, THD packed training")
+        if not args.calculate_per_token_loss or args.loss_type != "policy_loss" or args.use_opd:
+            raise ValueError("PTD requires per-token policy loss and cannot be combined with OPD advantage shaping")
+        if not use_legacy_rollout_v1():
+            raise ValueError("PTD currently requires MILES_USE_LEGACY_ROLLOUT_V1=1")
+        if args.ptd_teacher_url is None and (args.lora_rank <= 0 or args.lora_train_only):
+            raise ValueError("Sharing the frozen teacher with rollout requires LoRA rollout; otherwise set a teacher URL")
 
     # Validate on-policy distillation (OPD) arguments
     if args.use_opd:

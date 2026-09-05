@@ -21,6 +21,8 @@ ROLLOUT_DATA_TENSOR_DTYPES = {
     "rollout_sampling_mask_offsets": "int64",
     "teacher_log_probs": "float32",
     "opd_reverse_kl": "float32",
+    "ptd_teacher_ids": "int32",
+    "ptd_teacher_log_probs": "float32",
     "rollout_routed_experts": "int32",
     "rollout_indexer_topk": "int32",
 }
@@ -39,6 +41,7 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "multimodal_train_inputs": ValueSpec(codec="ragged_tensor_dict"),
     "prompt": ValueSpec(codec="msgpack_ragged"),
     "metadata": ValueSpec(codec="msgpack_ragged"),
+    "ptd_teacher_context": ValueSpec(codec="msgpack_ragged"),
     "weight_versions": ValueSpec(codec="msgpack_ragged"),
     "raw_reward": ValueSpec(codec="auto"),
     "total_lengths": ValueSpec(codec="auto"),
@@ -171,6 +174,17 @@ def convert_samples_to_train_data(
 
     if samples[0].opd_reverse_kl is not None:
         train_data["opd_reverse_kl"] = [sample.opd_reverse_kl for sample in samples]
+
+    if getattr(args, "ptd_coef", 0) > 0:
+        # Include explicit empty targets for correct/invalid responses, including
+        # all-success batches and batches whose first sample is not a target.
+        train_data["ptd_teacher_context"] = [sample.ptd_teacher_context for sample in samples]
+        for key, dtype in (("ptd_teacher_ids", torch.int32), ("ptd_teacher_log_probs", torch.float32)):
+            train_data[key] = [
+                getattr(sample, key) if sample.ptd_teacher_context is not None
+                else torch.empty((0, args.ptd_top_k), dtype=dtype)
+                for sample in samples
+            ]
 
     x = metadata.get("dynamic_global_batch_size")
     assert args.use_dynamic_global_batch_size == (x is not None)
@@ -394,6 +408,9 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "prompt",
             "teacher_log_probs",
             "opd_reverse_kl",
+            "ptd_teacher_ids",
+            "ptd_teacher_log_probs",
+            "ptd_teacher_context",
             "seq_witness_ids",
             "weight_versions",
             "adapter_slots",

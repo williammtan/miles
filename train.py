@@ -14,7 +14,7 @@ from miles.utils.ft_utils.control_server.server import start_control_server
 from miles.utils.ft_utils.mini_ft_controller import maybe_start_mini_ft_controller
 from miles.utils.logging_utils import configure_logger
 from miles.utils.lora import is_lora_enabled
-from miles.utils.misc import should_run_periodic_action
+from miles.utils.misc import should_run_eval, should_run_periodic_action
 from miles.utils.tracking_utils.tracking import finish_tracking, init_tracking
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,8 @@ async def train(args):
     # train loop.
     # note that for async training, one can change the position of the sync operation(ray.get).
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
-        if args.eval_interval is not None and rollout_id == args.start_rollout_id and not args.skip_eval_before_train:
+        if (args.eval_interval is not None and rollout_id == args.start_rollout_id
+                and not args.skip_eval_before_train and not args.eval_only_at_end):
             await rollout_manager.eval.remote(rollout_id)
 
         rollout_data_pack = await rollout_manager.generate.remote(rollout_id)
@@ -152,7 +153,7 @@ async def train(args):
         if args.offload_rollout:
             await rollout_manager.onload_kv.remote()
 
-        if should_run_periodic_action(rollout_id, args.eval_interval, num_rollout_per_epoch):
+        if should_run_eval(args, rollout_id, num_rollout_per_epoch):
             await rollout_manager.eval.remote(rollout_id)
 
         if (

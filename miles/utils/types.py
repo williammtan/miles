@@ -56,6 +56,9 @@ class Sample:
     remove_sample: bool = False
     teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
     opd_reverse_kl: list[float] | None = None  # Precomputed per-token OPD reverse-KL estimate
+    ptd_teacher_ids: torch.Tensor | None = None  # Response-only [R, K], CPU int32
+    ptd_teacher_log_probs: torch.Tensor | None = None  # Frozen teacher [R, K], CPU float32
+    ptd_teacher_context: dict | None = None  # Exact teacher prefix/media for sparse cross-scoring
 
     class Status(Enum):
         PENDING = "pending"
@@ -210,6 +213,12 @@ class Sample:
             assert (
                 len(self.opd_reverse_kl) == self.response_length
             ), f"opd_reverse_kl length ({len(self.opd_reverse_kl)}) != response_length ({self.response_length})"
+        if self.ptd_teacher_context is not None:
+            assert self.ptd_teacher_ids.shape == self.ptd_teacher_log_probs.shape
+            assert self.ptd_teacher_ids.shape[0] == self.response_length
+            assert self.ptd_teacher_context["response_tokens"] == (
+                self.tokens[-self.response_length:] if self.response_length else []
+            )
         if self.rollout_routed_experts is not None:
             actual = len(self.rollout_routed_experts)
             expect = len(self.tokens) - 1
@@ -243,6 +252,17 @@ class Sample:
             self.teacher_log_probs = self.teacher_log_probs[:-n]
         if self.opd_reverse_kl is not None:
             self.opd_reverse_kl = self.opd_reverse_kl[:-n]
+        if self.ptd_teacher_context is not None:
+            self.ptd_teacher_ids = self.ptd_teacher_ids[:-n]
+            self.ptd_teacher_log_probs = self.ptd_teacher_log_probs[:-n]
+            self.ptd_teacher_context = {
+                **self.ptd_teacher_context,
+                "response_tokens": self.ptd_teacher_context["response_tokens"][:-n],
+                "payload": {
+                    **self.ptd_teacher_context["payload"],
+                    "input_ids": self.ptd_teacher_context["payload"]["input_ids"][:-n],
+                },
+            }
         if self.metadata and "opd_student_top_logprobs" in self.metadata:
             self.metadata["opd_student_top_logprobs"] = self.metadata["opd_student_top_logprobs"][:-n]
         if self.loss_mask is not None:

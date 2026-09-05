@@ -19,6 +19,7 @@ from miles.backends.training_utils.loss_hub.math_utils import (
     compute_policy_loss,
 )
 from miles.backends.training_utils.parallel import get_parallel_state
+from miles.backends.training_utils.loss_hub.ptd import add_ptd_loss
 from miles.utils.misc import load_function
 from miles.utils.types import RolloutBatch
 
@@ -359,6 +360,10 @@ def policy_loss_function(
         )
         train_rollout_kl = sum_of_sample_mean(rollout_train_kl)
 
+    ptd_metrics = {}
+    if getattr(args, "ptd_coef", 0) > 0:
+        loss, ptd_metrics = add_ptd_loss(args, batch, logits, loss)
+
     reported_loss = {
         "loss": loss.clone().detach(),
         "pg_loss": pg_loss.clone().detach(),
@@ -366,6 +371,7 @@ def policy_loss_function(
         "pg_clipfrac": pg_clipfrac.clone().detach(),
         "ppo_kl": ppo_kl.clone().detach(),
         "ess_ratio": ess_ratio_sum.squeeze(),
+        **ptd_metrics,
     }
 
     if train_rollout_logprob_abs_diff is not None:
