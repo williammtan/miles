@@ -4,27 +4,23 @@ import torch
 import torch.distributed as dist
 
 from miles.backends.training_utils.loss_hub.logit_processors import _iter_response_chunks
-from miles.backends.training_utils.loss_hub.ptd_math import sparse_vocab_parallel_jsd, support_union, vocab_parallel_topk
+from miles.backends.training_utils.loss_hub.ptd_math import sparse_vocab_parallel_jsd, vocab_parallel_topk
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.rollout.ptd import score_teacher_missing_ids
+from miles.rollout.ptd import score_teacher_joint
 
 
-def _teacher_union_log_probs(context, ids, teacher_ids, teacher_log_probs, *, timeout, tp):
-    """Only TP rank zero queries the teacher; failures propagate to every rank."""
-    result = torch.empty(ids.shape, dtype=torch.float32, device=ids.device)
+def _teacher_union_targets(context, student_ids, *, timeout, tp):
+    """Broadcast one coherent joint teacher union, with at most 2K values per row."""
+    shape = (student_ids.shape[0], 2 * student_ids.shape[1])
+    ids = torch.empty(shape, dtype=torch.long, device=student_ids.device)
+    result = torch.empty(shape, dtype=torch.float32, device=student_ids.device)
     error = [None]
     if tp.rank == 0:
         try:
-            rows = ids.cpu().tolist()
-            known = [dict(zip(ii, pp, strict=True)) for ii, pp in zip(
-                teacher_ids.tolist(), teacher_log_probs.tolist(), strict=True,
-            )]
-            missing = [[i for i in row if i >= 0 and i not in cache] for row, cache in zip(rows, known, strict=True)]
-            if any(missing):
-                cross = score_teacher_missing_ids(context, missing, timeout)
-                for cache, extra in zip(known, cross, strict=True):
-                    cache.update(extra)
-            values = [[cache[i] if i >= 0 else -torch.inf for i in row] for row, cache in zip(rows, known, strict=True)]
+            selected, values = score_teacher_joint(
+                context, student_ids.cpu().tolist(), student_ids.shape[1], timeout,
+            )
+            ids.copy_(torch.tensor(selected, dtype=ids.dtype, device=ids.device))
             result.copy_(torch.tensor(values, dtype=result.dtype, device=result.device))
         except Exception as exc:
             error[0] = f"{type(exc).__name__}: {exc}"
@@ -34,8 +30,9 @@ def _teacher_union_log_probs(context, ids, teacher_ids, teacher_log_probs, *, ti
     if error[0] is not None:
         raise RuntimeError(f"PTD teacher sparse scoring failed: {error[0]}")
     if tp.size > 1:
+        dist.broadcast(ids, src=src, group=tp.group)
         dist.broadcast(result, src=src, group=tp.group)
-    return result.detach()
+    return ids, result.detach()
 
 
 def ptd_loss_sum(args, batch, logits):
@@ -62,11 +59,8 @@ def ptd_loss_sum(args, batch, logits):
             response_logits, args.ptd_top_k, vocab_start=vocab_start, vocab_size=args.ptd_vocab_size,
             tp_group=tp_group, chunk_size=args.ptd_logits_chunk_size,
         )
-        teacher_ids = torch.as_tensor(batch["ptd_teacher_ids"][index])
-        teacher_log_probs = torch.as_tensor(batch["ptd_teacher_log_probs"][index])
-        ids = support_union(student_ids, teacher_ids.to(device=logits.device, dtype=torch.long))
-        teacher_union = _teacher_union_log_probs(
-            context, ids, teacher_ids, teacher_log_probs, timeout=args.ptd_score_timeout, tp=state.tp,
+        ids, teacher_union = _teacher_union_targets(
+            context, student_ids, timeout=args.ptd_score_timeout, tp=state.tp,
         )
         token_losses = sparse_vocab_parallel_jsd(
             response_logits, ids, teacher_union, vocab_start=vocab_start, vocab_size=args.ptd_vocab_size,

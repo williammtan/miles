@@ -12,9 +12,9 @@ training response can receive an independent tutoring term. GRPO rewards and
 group normalization remain intact. Correct responses, judge failures, rejected
 hints, and evaluation receive no tutoring. The coefficient defaults to zero.
 
-At each response position, collect the union of the **current** student's Top-K
-and frozen teacher's Top-K vocabulary IDs. Query exact teacher probabilities for
-missing current-student IDs rather than assume a uniform tail. The remaining
+At each response position, compute the **current** student's Top-K, then request
+the frozen teacher's Top-K and exact probabilities at those student IDs together
+in **one teacher forward pass**. Build the union using only that response. The remaining
 probability mass is an explicit bucket. The true JSD is differentiated through
 student probabilities; teacher values are detached. TP ranks normalize over
 the complete vocabulary and communicate sparse support. Vocabulary workspaces
@@ -81,7 +81,7 @@ PYTHONPATH=. python tests/ptd/reproduce_upstream_jsd.py --upstream /path/to/PTD-
 PYTHONPATH=. python tests/ptd/check_multimodal_score.py --url http://engine:port
 ```
 
-Fifty-eight CPU checks cover all-wrong nonzero gradients, correct-response zero
+Seventy CPU checks cover all-wrong nonzero gradients, correct-response zero
 gradients, lambda=0 GRPO equivalence, dense reference values/gradients, masks,
 first-correct/later-wrong batches, grade validity, unusable hints, stale targets,
 EOS/truncation alignment, and global normalization. The implementation agent
@@ -98,8 +98,16 @@ weighting relative to the historical baseline and must be matched in a future
 controlled comparison.
 
 The live multimodal score check and independent review are required before the
-full training run. A fixed-ID live diagnostic passed with zero sparse-score
-error, zero repeated base drift, and nonzero adapter differences; this does not
-replace a short real training update and cold/warm scoring validation. Completed
-results are recorded with the recipe; unit and distributed math checks alone do
-not establish serving correctness.
+full training run. Live checks found a 0.37457 log-probability difference between
+an initial and later cached teacher request. Its cause is not established. This
+motivated joint training-time scoring: neither teacher probabilities nor teacher
+Top-K support are reused across forward passes. The online rollout callback
+stores only the hint and exact context; empty legacy score fields preserve the
+batch codec. Regression tests prove that stale scores/support cannot influence
+the loss and that new union IDs and scores are broadcast correctly across TP.
+
+The live joint check verifies overlapping values from both fields of the same
+HTTP response, including EOS. Cross-request cold/warm drift is diagnostic only;
+each computed JSD uses a coherent q from one response. Completed live and
+training results are recorded with the recipe; unit tests alone do not establish
+serving correctness.

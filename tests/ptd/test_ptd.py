@@ -83,11 +83,13 @@ def batch_and_args(targets):
 def install_teacher(monkeypatch, teacher):
     calls = []
 
-    def score(context, ids, timeout):
+    def score(context, ids, k, timeout):
         calls.append(ids)
-        return [{i: teacher[i].item() for i in row} for row in ids]
+        support = support_union(torch.tensor(ids), teacher.topk(k).indices.expand(len(ids), -1))
+        values = teacher[support.clamp_min(0)].masked_fill(support < 0, -torch.inf)
+        return support.tolist(), values.tolist()
 
-    monkeypatch.setattr(ptd, "score_teacher_missing_ids", score)
+    monkeypatch.setattr(ptd, "score_teacher_joint", score)
     return calls
 
 

@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from miles.rollout.ptd_scoring import request_scores, request_scores_async, validate_score_entries
+from miles.rollout.ptd_scoring import request_scores, validate_score_entries
 from miles.utils.types import Sample
 
 
@@ -115,15 +115,56 @@ async def collect_teacher_targets(args: Namespace, sample: Sample, tokenizer) ->
         sample.metadata.setdefault("ptd_hint_status", "needs_review")
         return
     sample.metadata[args.ptd_hint_key] = hint
-    context = teacher_score_context(args, sample, tokenizer, hint)
-    payload = {**context["payload"], "top_logprobs_num": args.ptd_top_k}
-    response = await request_scores_async(context["url"], payload, args.ptd_score_timeout)
-    rows = extract_score_rows(response, context, "input_top_logprobs")
-    for row in rows:
-        validate_score_entries(row, context["vocab_size"], count=args.ptd_top_k)
-    sample.ptd_teacher_ids = torch.tensor([[int(e[1]) for e in row] for row in rows], dtype=torch.int32)
-    sample.ptd_teacher_log_probs = torch.tensor([[float(e[0]) for e in row] for row in rows], dtype=torch.float32)
-    sample.ptd_teacher_context = context
+    sample.ptd_teacher_context = teacher_score_context(args, sample, tokenizer, hint)
+    # Preserve the ragged codec fields without caching probabilities from another
+    # teacher forward. Training collects the entire union in one joint request.
+    sample.ptd_teacher_ids = torch.empty((0, args.ptd_top_k), dtype=torch.int32)
+    sample.ptd_teacher_log_probs = torch.empty((0, args.ptd_top_k), dtype=torch.float32)
+
+
+def score_teacher_joint(
+    context: dict, ids_by_position: list[list[int]], top_k: int, timeout: float,
+) -> tuple[list[list[int]], list[list[float]]]:
+    """Score teacher Top-K and current student Top-K in one teacher forward.
+
+    Reusing teacher Top-K from an earlier request can combine different numerical
+    distributions when a hybrid model's prefix cache changes its execution path.
+    Every probability returned here comes from the same response. The union is
+    padded to 2K IDs with -1; padding log probabilities are negative infinity.
+    """
+    vocab_size = context["vocab_size"]
+    if type(vocab_size) is not int or not 0 < top_k <= vocab_size:
+        raise ValueError("PTD joint scoring requires 0 < Top-K <= vocabulary size")
+    if len(ids_by_position) != len(context["response_tokens"]):
+        raise ValueError("PTD student Top-K rows do not match the response length")
+    for ids in ids_by_position:
+        if not isinstance(ids, list) or len(ids) != top_k:
+            raise ValueError("PTD joint scoring requires one student Top-K row per response token")
+        if any(type(token) is not int or not 0 <= token < vocab_size for token in ids) or len(set(ids)) != top_k:
+            raise ValueError("PTD student Top-K contains invalid or duplicate token IDs")
+    payload = {
+        **context["payload"],
+        "top_logprobs_num": top_k,
+        "token_ids_logprob_positions": [[], *ids_by_position],
+    }
+    response = request_scores(context["url"], payload, timeout)
+    top_rows = extract_score_rows(response, context, "input_top_logprobs")
+    student_rows = extract_score_rows(response, context, "input_token_ids_logprobs")
+    union_ids, union_log_probs = [], []
+    for top, student, requested in zip(top_rows, student_rows, ids_by_position, strict=True):
+        teacher_probs = validate_score_entries(top, vocab_size, count=top_k)
+        cross_probs = validate_score_entries(student, vocab_size, requested=requested)
+        for token in teacher_probs.keys() & cross_probs.keys():
+            # Same-forward kernels may differ by fp32 rounding, not cache-state drift.
+            if not math.isclose(teacher_probs[token], cross_probs[token], rel_tol=0, abs_tol=2e-4):
+                raise ValueError("PTD joint teacher scores disagree on overlapping token IDs")
+        merged = {**cross_probs, **teacher_probs}
+        validate_score_entries([[lp, token] for token, lp in merged.items()], vocab_size)
+        ids = sorted(merged)
+        padding = 2 * top_k - len(ids)
+        union_ids.append([*ids, *([-1] * padding)])
+        union_log_probs.append([*(merged[token] for token in ids), *([-math.inf] * padding)])
+    return union_ids, union_log_probs
 
 
 def score_teacher_missing_ids(context: dict, ids_by_position: list[list[int]], timeout: float) -> list[dict[int, float]]:

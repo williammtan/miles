@@ -56,8 +56,8 @@ class Sample:
     remove_sample: bool = False
     teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
     opd_reverse_kl: list[float] | None = None  # Precomputed per-token OPD reverse-KL estimate
-    ptd_teacher_ids: torch.Tensor | None = None  # Response-only [R, K], CPU int32
-    ptd_teacher_log_probs: torch.Tensor | None = None  # Frozen teacher [R, K], CPU float32
+    ptd_teacher_ids: torch.Tensor | None = None  # Legacy codec field; joint scoring uses empty [0, K]
+    ptd_teacher_log_probs: torch.Tensor | None = None  # Legacy codec field; no cross-forward probabilities
     ptd_teacher_context: dict | None = None  # Exact teacher prefix/media for sparse cross-scoring
 
     class Status(Enum):
@@ -215,7 +215,7 @@ class Sample:
             ), f"opd_reverse_kl length ({len(self.opd_reverse_kl)}) != response_length ({self.response_length})"
         if self.ptd_teacher_context is not None:
             assert self.ptd_teacher_ids.shape == self.ptd_teacher_log_probs.shape
-            assert self.ptd_teacher_ids.shape[0] == self.response_length
+            assert self.ptd_teacher_ids.shape[0] in (0, self.response_length)
             assert self.ptd_teacher_context["response_tokens"] == (
                 self.tokens[-self.response_length:] if self.response_length else []
             )
