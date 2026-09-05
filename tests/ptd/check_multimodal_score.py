@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import uuid
 from argparse import Namespace
 from pathlib import Path
 
@@ -64,7 +65,8 @@ def main():
     vocab_size = config.get("text_config", config)["vocab_size"]
     score_args = Namespace(ptd_teacher_url=args.url + "/generate", ptd_vocab_size=vocab_size)
     context = teacher_score_context(score_args, sample, processor.tokenizer,
-                                    "Read the row and column labels first; compare color intensity only within the specified groups.")
+                                    "Read the row and column labels first; compare color intensity only within the specified groups. "
+                                    f"Diagnostic identity: {uuid.uuid4().hex}")
     assert context["payload"]["image_data"] == image_paths
     assert context["payload"]["input_ids"][-len(sample.tokens):] == sample.tokens
     teacher = post(context["url"], {**context["payload"], "top_logprobs_num": 4})
@@ -72,9 +74,12 @@ def main():
     selected = [[int(entries[0][1]), 42 + index] for index, entries in enumerate(top)]
     sparse = score_teacher_missing_ids(context, selected, 600)
     # Small independent global-ID request is a reference for this 8-token smoke only.
-    all_ids = sorted({token for ids in selected for token in ids})
+    all_ids = sorted({token for ids in selected for token in ids} | {int(e[1]) for row in top for e in row})
     reference = post(context["url"], {**context["payload"], "token_ids_logprob": all_ids})
     ref_rows = extract_score_rows(reference, context, "input_token_ids_logprobs")
+    reference_maps = [{int(entry[1]): float(entry[0]) for entry in row} for row in ref_rows]
+    cold_warm_error = max(abs(float(entry[0]) - ref[int(entry[1])])
+                          for row, ref in zip(top, reference_maps, strict=True) for entry in row)
     max_error = 0
     for actual, entries in zip(sparse, ref_rows, strict=True):
         expected = {int(entry[1]): float(entry[0]) for entry in entries}
@@ -100,15 +105,17 @@ def main():
     repeat_error = max(max_difference(before[0], scores) for scores in before[1:])
     student = score_maps(post(context["url"], {**fixed_payload, "lora_path": "miles_lora"}), context)
     adapter_diff = max_difference(student, after)
-    passed = max_error < 2e-4 and base_error < 2e-4 and repeat_error < 2e-4 and adapter_diff > 1e-5
+    passed = max_error < 2e-4 and base_error < 2e-4 and repeat_error < 2e-4 and cold_warm_error < 2e-4 and adapter_diff > 1e-5
     artifact = {"prompt_tokens": len(prompt_ids), "response_tokens": tokens, "image_count": len(image_paths),
                       "sparse_max_logprob_error": max_error, "frozen_base_after_adapter_load_error": base_error,
                       "pre_update_repeat_error": repeat_error,
+                      "initial_topk_vs_later_fixed_id_error": cold_warm_error,
+                      "initial_topk": top,
                       "student_adapter_max_difference": adapter_diff, "one_token_eos": eos,
                       "adapter_load": loaded, "status": "passed" if passed else "failed",
                       "fixed_ids": all_ids, "base_before": before, "base_after": after, "student": student}
     Path(args.output).write_text(json.dumps(artifact, indent=2))
-    print(json.dumps({k: v for k, v in artifact.items() if k not in {"base_before", "base_after", "student"}}), flush=True)
+    print(json.dumps({k: v for k, v in artifact.items() if k not in {"base_before", "base_after", "student", "initial_topk"}}), flush=True)
     assert passed, "See fixed-ID scoring artifact for serving variability or adapter isolation failure"
 
 
