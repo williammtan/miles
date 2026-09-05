@@ -52,6 +52,9 @@ TP>=1, CP=1, THD, per-token policy loss, frozen base teacher with a LoRA student
 Run `tools/patch_sglang_ptd.py` before SGLang startup; this adds per-position
 scoring to the existing private runtime without replacing its package. The
 patch preserves originals and rejects unknown/partial patch states.
+Its Qwen preprocessing extension also preserves exact, already-expanded image
+prompt and response IDs. It supports image-only PTD contexts and rejects image
+span/count mismatches. Text-only scoring does not use this preprocessing path.
 
 Required arguments:
 
@@ -132,3 +135,17 @@ zero cross-request difference and zero same-forward disagreement. Retries also
 get a fresh salt while preserving tokens, media and support. This avoids reusing
 a prefix cached by a timed-out attempt. Within-request chunk continuation and
 image-feature caching remain available.
+
+A later smoke batch exposed a separate Qwen preprocessing issue: supplying
+`input_ids` still decoded and retokenized them when an image was present. The
+actual sampled pair `[469, 26000]` became `[14944, 334]` at response offsets 6–7,
+with unchanged total length, and strict response-ID validation stopped training.
+The additive Qwen patch now restores all original IDs before model input
+construction. It validates expanded image spans against processed image sizes,
+copies media items before updating their offsets, and recomputes padded IDs and
+mRoPE from the exact sequence. Existing cached image features remain reusable.
+The patch applies only to PTD per-position scoring; ordinary generation follows
+the existing path. Regression tests execute the patched deployed Qwen method
+for equal-length and unequal-length retokenization, moved image spans, and
+invalid media alignment. Numeric mismatch diagnostics retain strict validation
+without printing response text.

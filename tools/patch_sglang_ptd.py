@@ -1,4 +1,4 @@
-"""Add per-position sparse prefill scoring to the pinned Miles SGLang runtime.
+"""Add sparse prefill scoring and exact image token preservation to Miles SGLang.
 
 This patches existing files in place with exact anchors; it never installs or
 replaces a package. Original files are retained as .ptd-po-backup. Reapplication
@@ -11,6 +11,40 @@ from pathlib import Path
 
 
 MARKER = "# MILES_PTD_SPARSE_V1"
+MM_MARKER = "# MILES_PTD_EXACT_MM_TOKENS_V1"
+SPARSE_SOURCES = ("managers/io_struct.py", "managers/tokenizer_manager.py", "managers/schedule_batch.py",
+                  "layers/logprob_processor.py")
+MM_SOURCE = "multimodal/processors/qwen_vl.py"
+
+_MM_HELPER = '''    def _ptd_preserve_image_input(self, original_ids, input_ids, mm_items):
+        """Restore exact expanded PTD tokens before padding and mRoPE construction."""
+        # MILES_PTD_EXACT_MM_TOKENS_V1
+        if not isinstance(original_ids, list) or any(type(token) is not int for token in original_ids):
+            raise ValueError("PTD image scoring requires the original integer input_ids")
+        if not mm_items or any(not item.is_image() for item in mm_items):
+            raise ValueError("PTD exact multimodal scoring currently supports images only")
+        spans = []
+        for position, token in enumerate(original_ids):
+            if token != self.mm_tokens.image_token_id:
+                continue
+            if spans and spans[-1][1] == position - 1:
+                spans[-1] = (spans[-1][0], position)
+            else:
+                spans.append((position, position))
+        if len(spans) != len(mm_items):
+            raise ValueError("PTD expanded image token spans do not match the processed images")
+        restored_items = []
+        for span, item in zip(spans, mm_items, strict=True):
+            if (item.offsets is None or len(item.offsets) != 1
+                    or span[1] - span[0] != item.offsets[0][1] - item.offsets[0][0]):
+                raise ValueError("PTD expanded image token count differs from the image processor")
+            # Feature tensors may be cached; never mutate a cached item's offsets.
+            restored = copy.copy(item)
+            restored.offsets = [span]
+            restored_items.append(restored)
+        return input_ids.new_tensor(original_ids), restored_items
+
+'''
 
 
 def _replace(text, old, new):
@@ -20,7 +54,7 @@ def _replace(text, old, new):
     return text.replace(old, new, 1)
 
 
-def patch_sources(sources):
+def patch_sparse_sources(sources):
     if all(MARKER in source for source in sources.values()):
         return sources
     if any(MARKER in source for source in sources.values()):
@@ -110,6 +144,39 @@ def patch_sources(sources):
     return result
 
 
+def patch_mm_source(source):
+    if MM_MARKER in source:
+        return source
+    source = _replace(source, "import math\n", "import copy\nimport math\n")
+    source = _replace(source, "    async def process_mm_data_async(\n",
+                      _MM_HELPER + "    async def process_mm_data_async(\n")
+    source = _replace(source,
+        "        self._mark_dp_encoder_features_for_deferred_reconstruction(mm_items)\n",
+        "        ptd_exact_ids = getattr(request_obj, 'token_ids_logprob_positions', None) is not None\n"
+        "        if ptd_exact_ids:\n"
+        "            input_ids, mm_items = self._ptd_preserve_image_input(\n"
+        "                request_obj.input_ids, input_ids, mm_items\n"
+        "            )\n"
+        "            base_output.input_ids = request_obj.input_ids\n"
+        "        self._mark_dp_encoder_features_for_deferred_reconstruction(mm_items)\n")
+    source = _replace(source,
+        '        padded_input_ids = self._get_processor_output_value(ret, "padded_input_ids")\n',
+        '        padded_input_ids = None if ptd_exact_ids else self._get_processor_output_value(ret, "padded_input_ids")\n')
+    source = _replace(source,
+        "        mrope_result = self._get_precomputed_mrope_from_output(ret)\n",
+        "        mrope_result = None if ptd_exact_ids else self._get_precomputed_mrope_from_output(ret)\n")
+    compile(source, MM_SOURCE, "exec")
+    return source
+
+
+def patch_sources(sources):
+    # Upgrade sparse-v1 installations in place: their original four files remain
+    # untouched while Qwen gains exact input-token preservation.
+    result = {**sources, **patch_sparse_sources({name: sources[name] for name in SPARSE_SOURCES})}
+    result[MM_SOURCE] = patch_mm_source(sources[MM_SOURCE])
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sglang-root", type=Path)
@@ -117,7 +184,7 @@ def main():
     root = args.sglang_root
     if root is None:
         root = Path(importlib.util.find_spec("sglang").origin).parent / "srt"
-    names = ("managers/io_struct.py", "managers/tokenizer_manager.py", "managers/schedule_batch.py", "layers/logprob_processor.py")
+    names = (*SPARSE_SOURCES, MM_SOURCE)
     sources = {name: (root / name).read_text() for name in names}
     patched = patch_sources(sources)
     for name, source in patched.items():
@@ -129,7 +196,7 @@ def main():
             raise ValueError(f"Refusing to overwrite original backup {backup}")
         backup.write_text(sources[name])
         path.write_text(source)
-    print("SGLang PTD sparse scoring patch installed (or already present).")
+    print("SGLang PTD sparse scoring and exact image-token patches installed (or already present).")
 
 
 if __name__ == "__main__":

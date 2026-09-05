@@ -1,0 +1,181 @@
+"""Pinned deployed Qwen method for CPU testing of the additive patch.
+
+Source: sglang/srt/multimodal/processors/qwen_vl.py, read 2026-09-05.
+Whole source SHA256: 6ae64acb907aa9d1ed696120b2159c5c6924b2c9234afda6f8f74db07293dd4d
+Only external image processing and mRoPE computation are replaced by test doubles.
+"""
+
+from __future__ import annotations
+
+import math
+
+
+class QwenVLImageProcessor:
+    async def process_mm_data_async(
+        self,
+        image_data: List[Union[str, bytes]],
+        input_text,
+        request_obj,
+        *args,
+        **kwargs,
+    ):
+        entry_time = time.perf_counter()
+        base_output = await self.legacy_load_mm_data(
+            prompt=input_text,
+            image_data=image_data,
+            video_data=request_obj.video_data,
+            audio_data=request_obj.audio_data,
+            multimodal_tokens=self.mm_tokens,
+        )
+        load_time = time.perf_counter()
+        rid = getattr(request_obj, "rid", "anonymous_rid")
+
+        video_metadata = None
+        if base_output.videos and not isinstance(base_output.videos[0], dict):
+            videos_processed = [
+                await preprocess_video(video, video_config=self.video_config)
+                for video in base_output.videos
+            ]
+            base_output.videos, video_metadata = map(list, zip(*videos_processed))
+
+        preprocess_time = time.perf_counter()
+
+        processor_kwargs = {}
+        processor_video_config = _get_processor_video_config(
+            self.video_config, video_metadata
+        )
+        if processor_video_config is not None:
+            processor_kwargs["processor_video_config"] = processor_video_config
+
+        # NOTE: for qwen3-vl, video_meta need to be passed in, since do_sample_frames is already done in preprocess_video
+        if self.hf_config.model_type in (
+            "qwen3_vl",
+            "qwen3_vl_moe",
+            "qwen3_5",
+            "qwen3_5_moe",
+            "intern_s2_preview",
+            "interns2_mobius",
+        ):
+            processor_kwargs.update(
+                video_metadata=video_metadata,
+                do_sample_frames=False,
+            )
+
+        mm_items, input_ids, ret = await self.process_and_combine_mm_data_async(
+            base_output, self.mm_tokens, **processor_kwargs
+        )
+
+        self._mark_dp_encoder_features_for_deferred_reconstruction(mm_items)
+
+        audio_feature_lengths = None
+
+        if self.model_type == "qwen3_omni_moe":
+            audio_item = next((mm for mm in mm_items if mm.is_audio()), None)
+            if audio_item:
+                audio_feature_lengths = torch.sum(
+                    audio_item.feature_attention_mask, dim=1
+                )
+
+        second_per_grid_ts = self._get_processor_output_value(ret, "second_per_grid_ts")
+        if second_per_grid_ts is None:
+            second_per_grid_ts = self._get_processor_output_value(
+                ret, "video_second_per_grid"
+            )
+
+        process_time = time.perf_counter()
+
+        input_ids = input_ids.flatten()
+        base_input_ids = getattr(base_output, "input_ids", None)
+        if (
+            isinstance(base_input_ids, list)
+            and len(base_input_ids) == input_ids.numel()
+        ):
+            # reuse preprocess input if it already carries list of input_ids
+            input_ids_list = base_input_ids
+        else:
+            input_ids_list = input_ids.tolist()
+
+        # look for if padded_input_ids already exists before computing
+        padded_input_ids = self._get_processor_output_value(ret, "padded_input_ids")
+        if padded_input_ids is None:
+            padded_input_ids = MultimodalProcessorOutput.build_padded_input_ids(
+                input_ids_list, mm_items
+            )
+        elif isinstance(padded_input_ids, torch.Tensor):
+            # reuse existing padded_input_ids
+            padded_input_ids = padded_input_ids.flatten().tolist()
+        else:
+            padded_input_ids = list(padded_input_ids)
+
+        image_grid_thw = self._get_grid_from_output_or_items(
+            ret, mm_items, "image_grid_thw", Modality.IMAGE, image_data
+        )
+        video_grid_thw = self._get_grid_from_output_or_items(
+            ret,
+            mm_items,
+            "video_grid_thw",
+            Modality.VIDEO,
+            request_obj.video_data,
+        )
+
+        mrope_result = self._get_precomputed_mrope_from_output(ret)
+        if mrope_result is None:
+            if (
+                video_grid_thw is None
+                and second_per_grid_ts is None
+                and audio_feature_lengths is None
+            ):
+                mrope_result = self._compute_image_only_mrope_positions_from_offsets(
+                    input_len=input_ids.numel(),
+                    mm_items=mm_items,
+                    dtype=input_ids.dtype,
+                    device=input_ids.device,
+                )
+        if mrope_result is None:
+            mrope_result = MRotaryEmbedding.get_rope_index(
+                spatial_merge_size=self._spatial_merge_size,
+                image_token_id=self.mm_tokens.image_token_id,
+                video_token_id=self.mm_tokens.video_token_id,
+                vision_start_token_id=self.vision_start_token_id,
+                model_type=self.model_type,
+                tokens_per_second=self._tokens_per_second,
+                # use the expanded token ids
+                input_ids=input_ids.unsqueeze(0),
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=video_grid_thw,
+                second_per_grid_ts=second_per_grid_ts,
+                use_audio_in_video=False,
+                audio_seqlens=audio_feature_lengths,
+                audio_token_id=getattr(self.hf_config, "audio_token_id", None),
+                audio_start_token_id=self.audio_start_token_id,
+                position_id_per_seconds=getattr(
+                    self.hf_config, "position_id_per_seconds", None
+                ),
+            )
+
+        mrope_positions, mrope_position_delta = mrope_result
+        if mrope_positions.ndim == 3:
+            mrope_positions = mrope_positions.squeeze(1)
+        get_rope_index_time = time.perf_counter()
+        logger.debug(
+            f"[QwenVLProcessor Perf] {rid=}, "
+            f"load_time: {(load_time - entry_time) * 1000:.2f} ms, "
+            f"preprocess_time: {(preprocess_time - load_time) * 1000:.2f} ms, "
+            f"process_time: {(process_time - preprocess_time) * 1000:.2f} ms, "
+            f"get_rope_index_time: {(get_rope_index_time - process_time) * 1000:.2f} ms, "
+            f"total_time: {(get_rope_index_time - entry_time) * 1000:.2f} ms"
+        )
+
+        return MultimodalProcessorOutput(
+            input_ids=input_ids_list,
+            padded_input_ids=padded_input_ids,
+            mm_items=mm_items,
+            im_start_id=self.vision_start_token_id,
+            im_end_id=self.vision_end_token_id,
+            im_token_id=self.mm_tokens.image_token_id,
+            video_token_id=self.mm_tokens.video_token_id,
+            audio_token_id=self.mm_tokens.audio_token_id,
+            mrope_positions=mrope_positions,
+            mrope_position_delta=mrope_position_delta,
+        )
+

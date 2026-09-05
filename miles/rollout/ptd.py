@@ -100,8 +100,17 @@ def extract_score_rows(response: dict, context: dict, field: str) -> list:
     # logprob_start_len starts one token before response; row 0 is a null placeholder.
     if len(scored) != len(expected) + 1:
         raise ValueError(f"PTD score count mismatch: {len(scored)} != {len(expected) + 1}")
-    if any(type(row[1]) is not int for row in scored[1:]) or [row[1] for row in scored[1:]] != expected:
-        raise ValueError("PTD teacher response token IDs do not match the unchanged sampled continuation")
+    for index, (row, token) in enumerate(zip(scored[1:], expected, strict=True)):
+        if not isinstance(row, (list, tuple)) or len(row) < 2:
+            raise ValueError(f"PTD teacher returned a malformed response score row at response_index={index}")
+        if type(row[1]) is not int or row[1] != token:
+            # Emit only numeric IDs and type names, never returned text or payloads.
+            actual = row[1] if type(row[1]) is int else None
+            raise ValueError(
+                "PTD teacher response token IDs do not match the unchanged sampled continuation: "
+                f"response_index={index}, expected_token_id={token}, actual_token_id={actual}, "
+                f"actual_type={type(row[1]).__name__}, response_length={len(expected)}"
+            )
     if any(not isinstance(row[0], (int, float)) or isinstance(row[0], bool) or not math.isfinite(row[0]) or row[0] > 0 for row in scored[1:]):
         raise ValueError("PTD teacher returned an invalid response-token log probability")
     rows = meta.get(field)
