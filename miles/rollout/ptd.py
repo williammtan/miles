@@ -2,6 +2,7 @@
 
 import json
 import math
+import uuid
 from argparse import Namespace
 from typing import Any
 
@@ -146,6 +147,9 @@ def score_teacher_joint(
         **context["payload"],
         "top_logprobs_num": top_k,
         "token_ids_logprob_positions": [[], *ids_by_position],
+        # Isolate hybrid-model prefix state across logical teacher requests.
+        # Transport refreshes the salt on retries while preserving semantic input.
+        "cache_salt": uuid.uuid4().hex,
     }
     response = request_scores(context["url"], payload, timeout)
     top_rows = extract_score_rows(response, context, "input_top_logprobs")

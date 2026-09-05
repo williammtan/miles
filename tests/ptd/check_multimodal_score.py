@@ -81,7 +81,10 @@ def joint_check(context, selected):
         assert actual == expected
         maps.append(student)
     assert error < 2e-4
-    return maps, {"same_forward_overlap_error": error, "overlap_count": overlaps, "requests": 1}
+    cached_tokens = captured[0]["meta_info"].get("cached_tokens")
+    assert cached_tokens == 0, f"Fresh teacher scoring reused {cached_tokens} cached tokens"
+    return maps, {"same_forward_overlap_error": error, "overlap_count": overlaps, "requests": 1,
+                  "cached_tokens": cached_tokens}
 
 
 def max_difference(left, right):
@@ -95,6 +98,7 @@ def main():
     parser.add_argument("--dataset", default="/weka/handshake/vqa/train_le24k.jsonl")
     parser.add_argument("--trace-file")
     parser.add_argument("--row", type=int, default=0)
+    parser.add_argument("--top-k", type=int, default=100)
     parser.add_argument("--adapter", default="/weka/handshake/checkpoints/qwen3p8-27b-lora/iter_0000019/adapter")
     parser.add_argument("--read-only-existing-adapter", action="store_true")
     parser.add_argument("--output", default="/tmp/ptd-joint-check.json")
@@ -108,8 +112,8 @@ def main():
     context = ptd.teacher_score_context(score_args, sample, processor.tokenizer, hint)
     assert context["payload"]["input_ids"][-len(sample.tokens):] == sample.tokens
     assert context["payload"]["image_data"] == sample.metadata["ptd_media_payload"]["image_data"]
-    selected = [list(dict.fromkeys([token, 42 + i % 47, 100 + i % 53, 210, 211]))[:4]
-                for i, token in enumerate(context["response_tokens"])]
+    selected = [list(dict.fromkeys([token, *range(args.top_k)]))[:args.top_k]
+                for token in context["response_tokens"]]
     print("Checking one-forward teacher scores on original images and response IDs", flush=True)
     cold, cold_report = joint_check(context, selected)
     warm, warm_report = joint_check(context, selected)
@@ -122,7 +126,7 @@ def main():
     prefix = sample.tokens[:-sample.response_length]
     one = Sample(tokens=prefix + [eos], response_length=1, metadata=sample.metadata)
     one_context = ptd.teacher_score_context(score_args, one, processor.tokenizer, hint)
-    _, eos_report = joint_check(one_context, [[eos, 42, 100, 210]])
+    _, eos_report = joint_check(one_context, [list(dict.fromkeys([eos, *range(args.top_k)]))[:args.top_k]])
     base_error, adapter_diff = max_difference(warm, after), max_difference(after, student)
     report = {"status": "passed" if base_error < 2e-4 and adapter_diff > 1e-5 else "failed",
               "joint_cold": cold_report, "joint_warm": warm_report, "joint_student": student_report,
@@ -132,6 +136,8 @@ def main():
               "prompt_tokens": len(prefix), "response_tokens": sample.response_length,
               "response_ids_sha256": hashlib.sha256(json.dumps(context["response_tokens"]).encode()).hexdigest(),
               "image_count": len(context["payload"]["image_data"])}
+    report["top_k"] = args.top_k
+    assert cold_report["overlap_count"] > 0 and warm_report["overlap_count"] > 0
     Path(args.output).write_text(json.dumps(report, indent=2))
     print(json.dumps(report), flush=True)
     assert report["status"] == "passed", "Joint scoring passed but adapter isolation check failed"

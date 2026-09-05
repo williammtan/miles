@@ -2,6 +2,8 @@
 
 import asyncio
 import copy
+import io
+import json
 import math
 from argparse import Namespace
 from types import SimpleNamespace
@@ -14,6 +16,7 @@ import torch.multiprocessing as mp
 from miles.backends.training_utils.loss_hub import ptd as loss_ptd
 from miles.backends.training_utils.parallel import set_parallel_state
 from miles.rollout import ptd as rollout_ptd
+from miles.rollout import ptd_scoring as scoring
 from miles.utils.types import Sample
 
 
@@ -65,6 +68,74 @@ def test_one_request_contains_both_fields_and_uses_only_joint_response(monkeypat
         assert len(row) == len(values) == 4
         for token, lp in zip(row, values, strict=True):
             assert lp == (math.log(probs[token]) if token >= 0 else -math.inf)
+    assert context == original
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_teacher_retries_preserve_semantic_payload_with_fresh_salt(monkeypatch, asynchronous):
+    context = _context()
+    context["payload"]["cache_salt"] = "stale-context-salt"
+    original = copy.deepcopy(context)
+    student = [[0, 4], [1, 4]]
+    attempts = []
+
+    def answer(payload):
+        attempts.append(payload)
+        if len(attempts) % 2 == 1:
+            raise ConnectionError("transient teacher transport failure")
+        return _response(context, _probabilities(), student, 2)
+
+    if asynchronous:
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            async def __aenter__(self):
+                self.value = answer(self.payload)
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def raise_for_status(self):
+                pass
+
+            async def json(self):
+                return self.value
+
+        class Session:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+            def post(self, url, *, json, timeout):
+                return Response(json)
+
+        async def no_sleep(delay):
+            pass
+
+        monkeypatch.setattr(scoring.aiohttp, "ClientSession", Session)
+        monkeypatch.setattr(scoring.asyncio, "sleep", no_sleep)
+        monkeypatch.setattr(rollout_ptd, "request_scores",
+                            lambda url, payload, timeout: asyncio.run(scoring.request_scores_async(url, payload, timeout)))
+    else:
+        def urlopen(request, *, timeout):
+            return io.StringIO(json.dumps(answer(json.loads(request.data))))
+
+        monkeypatch.setattr(scoring.urllib.request, "urlopen", urlopen)
+        monkeypatch.setattr(scoring.time, "sleep", lambda delay: None)
+    first = rollout_ptd.score_teacher_joint(context, student, 2, 12.0)
+    second = rollout_ptd.score_teacher_joint(context, student, 2, 12.0)
+    assert first == second
+    assert len(attempts) == 4
+    assert len({payload["cache_salt"] for payload in attempts}) == 4
+    semantic_payloads = [{key: value for key, value in payload.items() if key != "cache_salt"} for payload in attempts]
+    assert all(payload == semantic_payloads[0] for payload in semantic_payloads)
+    for payload in attempts:
+        salt = payload["cache_salt"]
+        assert len(salt) == 32 and all(character in "0123456789abcdef" for character in salt)
     assert context == original
 
 

@@ -7,6 +7,7 @@ import math
 import time
 import urllib.error
 import urllib.request
+import uuid
 from numbers import Real
 
 import aiohttp
@@ -68,15 +69,16 @@ def _retry_delay(error, attempt, deadline):
 
 
 async def request_scores_async(url, payload, timeout):
-    """Retry only transient failures, with one total deadline for identical requests."""
+    """Retry transient failures within one deadline, refreshing salted teacher caches."""
     deadline = time.monotonic() + timeout
     async with aiohttp.ClientSession() as session:
         for attempt in range(_MAX_ATTEMPTS):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError("PTD teacher scoring exceeded its deadline")
+            attempt_payload = _attempt_payload(payload, attempt)
             try:
-                async with session.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=remaining)) as response:
+                async with session.post(url, json=attempt_payload, timeout=aiohttp.ClientTimeout(total=remaining)) as response:
                     response.raise_for_status()
                     result = await response.json()
                 return _check_response(result)
@@ -89,13 +91,14 @@ async def request_scores_async(url, payload, timeout):
 def request_scores(url, payload, timeout):
     """Synchronous equivalent used inside the training loss."""
     deadline = time.monotonic() + timeout
-    request = urllib.request.Request(
-        url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST",
-    )
     for attempt in range(_MAX_ATTEMPTS):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise RuntimeError("PTD teacher scoring exceeded its deadline")
+        attempt_payload = _attempt_payload(payload, attempt)
+        request = urllib.request.Request(
+            url, data=json.dumps(attempt_payload).encode(), headers={"Content-Type": "application/json"}, method="POST",
+        )
         try:
             with urllib.request.urlopen(request, timeout=remaining) as response:
                 result = json.load(response)
@@ -104,3 +107,10 @@ def request_scores(url, payload, timeout):
             raise ValueError("PTD teacher returned malformed score JSON") from None
         except Exception as error:
             time.sleep(_retry_delay(error, attempt, deadline))
+
+
+def _attempt_payload(payload, attempt):
+    """A timed-out attempt may still cache hybrid state; salted retries isolate it."""
+    if attempt > 0 and "cache_salt" in payload:
+        return {**payload, "cache_salt": uuid.uuid4().hex}
+    return payload

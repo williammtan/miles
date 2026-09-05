@@ -111,3 +111,11 @@ HTTP response, including EOS. Cross-request cold/warm drift is diagnostic only;
 each computed JSD uses a coherent q from one response. Completed live and
 training results are recorded with the recipe; unit tests alone do not establish
 serving correctness.
+
+A longer real response exposed a 9.10937 log-probability cold/warm difference.
+Each teacher request now uses a fresh `cache_salt`, isolating its KV and Mamba
+prefix state. Repeating that 3,653-token response with K=100 then gave exactly
+zero cross-request difference and zero same-forward disagreement. Retries also
+get a fresh salt while preserving tokens, media and support. This avoids reusing
+a prefix cached by a timed-out attempt. Within-request chunk continuation and
+image-feature caching remain available.
