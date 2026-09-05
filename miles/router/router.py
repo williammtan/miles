@@ -71,6 +71,8 @@ class MilesRouter:
         self.app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])(self.proxy)
 
     async def _start_background_health_check(self):
+        if getattr(self.args, "router_disable_health_check", False):
+            return
         asyncio.create_task(self._health_check_loop())
 
     async def _check_worker_health(self, url):

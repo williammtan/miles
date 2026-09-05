@@ -11,6 +11,7 @@ from miles.backends.sglang_utils.arguments import add_sglang_arguments, collect_
 from miles.backends.sglang_utils.arguments import validate_args as sglang_validate_args
 from miles.dashboard.args import add_dashboard_arguments, validate_dashboard_args
 from miles.rollout.checkpoint_eval import is_checkpoint_eval_fn
+from miles.rollout.ptd import validate_teacher_route
 from miles.utils.chat_template_utils.tito_tokenizer import TITOTokenizerType
 from miles.utils.environ import enable_experimental_ft_trainer, use_legacy_rollout_v1
 from miles.utils.eval_config import EvalDatasetConfig, build_eval_dataset_configs, ensure_dataset_list
@@ -1665,7 +1666,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                                 help="Async (args, sample) -> answer-free hint, called only for verified failed rollouts.")
             parser.add_argument("--ptd-hint-key", type=str, default="ptd_hint")
             parser.add_argument("--ptd-teacher-url", type=str, default=None,
-                                help="Frozen initial-model /generate endpoint; default is rollout router without LoRA.")
+                                help="Frozen initial-model /generate endpoint; default requires --use-miles-router. "
+                                     "Must preserve sparse scoring fields and cache_salt.")
             parser.add_argument("--ptd-score-timeout", type=float, default=1200.0)
             parser.add_argument("--ptd-logits-chunk-size", type=int, default=128)
             parser.add_argument("--ptd-vocab-size", type=int, default=None,
@@ -3055,6 +3057,7 @@ def miles_validate_args(args):
     if args.ptd_coef < 0:
         raise ValueError("--ptd-coef must be nonnegative")
     if args.ptd_coef > 0:
+        validate_teacher_route(args)
         if not args.ptd_hint_function_path or not args.ptd_vocab_size:
             raise ValueError("PTD requires --ptd-hint-function-path and --ptd-vocab-size")
         if not 0 < args.ptd_top_k <= args.ptd_vocab_size or args.ptd_logits_chunk_size <= 0:

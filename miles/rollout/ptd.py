@@ -12,6 +12,17 @@ from miles.rollout.ptd_scoring import request_scores, validate_score_entries
 from miles.utils.types import Sample
 
 
+def validate_teacher_route(args: Namespace) -> None:
+    """The pinned Rust router drops PTD's sparse IDs and cache-isolation salt."""
+    if getattr(args, "ptd_coef", 0) > 0 and not args.ptd_teacher_url and not args.use_miles_router:
+        raise ValueError(
+            "PTD requires --use-miles-router when --ptd-teacher-url is unset: "
+            "the SGLang Rust router drops token_ids_logprob_positions and cache_salt. "
+            "An explicit teacher URL must reach a patched engine through a proxy that preserves these fields "
+            "or connect directly to the engine."
+        )
+
+
 def is_tutor_target(args: Namespace, sample: Sample) -> bool:
     """Infrastructure failures are never evidence that an answer is incorrect."""
     return (

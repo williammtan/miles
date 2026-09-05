@@ -58,6 +58,7 @@ Required arguments:
 ```
 --ptd-coef 0.05 --ptd-top-k 100 --ptd-vocab-size 248320
 --ptd-hint-function-path integrations.handshake.ptd_hint.generate_hint
+--use-miles-router
 ```
 
 The reward integration must mark `sample.metadata['grade_valid']` as True only
@@ -70,6 +71,18 @@ response token IDs are checked before accepting teacher distributions. Explicit
 Use synchronous `train.py` initially. A separately routed frozen teacher URL is
 supported. The shared rollout engine path has not been validated for concurrent
 asynchronous rollout aborts; do not treat the synchronous recipe as that claim.
+
+The pinned SGLang Rust router (0.3.2) reserializes `/generate` and drops both
+`token_ids_logprob_positions` and `cache_salt`. A CPU echo-worker probe reproduced
+this after training failed with missing cross-probabilities despite direct-engine
+checks passing. PTD therefore requires the existing Miles byte-preserving proxy
+when sharing the rollout router; startup rejects the incompatible default. An
+explicit `--ptd-teacher-url` must reach a patched engine directly or use a proxy
+that preserves both fields. Live checks must cover the actual production proxy.
+MilesRouter also honors `--router-disable-health-check`, so that flag does not
+silently leave Python-router worker quarantine active during long prefills.
+Automatic worker replacement requires a `/remove_worker` route that MilesRouter
+does not currently implement; this recipe uses a fixed synchronous worker fleet.
 
 ## Verification
 
