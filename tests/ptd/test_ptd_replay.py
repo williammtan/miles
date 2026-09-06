@@ -45,6 +45,9 @@ def _args(path):
         rollout_batch_size=2,
         n_samples_per_prompt=2,
         ptd_replay_rollout_data=str(path),
+        ptd_teacher_url=None,
+        sglang_router_ip="10.0.0.2",
+        sglang_router_port=18080,
     )
 
 
@@ -57,7 +60,10 @@ def test_replay_preserves_saved_batch_and_advances_source(tmp_path):
     fresh = [_sample(index) for index in range(4, 8)]
     replayed = list(reversed([_sample(index) for index in range(4, 8)]))
     replayed[0].tokens = [10, 11, 12]
-    replayed[0].ptd_teacher_context = {"payload": {"input_ids": [10, 11, 12]}}
+    replayed[0].ptd_teacher_context = {
+        "url": "http://stale-router:10000/generate",
+        "payload": {"input_ids": [10, 11, 12]},
+    }
     path = tmp_path / "rollout-1.pt"
     _save(path, replayed)
     source = Source(fresh)
@@ -66,7 +72,8 @@ def test_replay_preserves_saved_batch_and_advances_source(tmp_path):
 
     assert [sample.index for sample in loaded] == [sample.index for sample in replayed]
     assert loaded[0].tokens == [10, 11, 12]
-    assert loaded[0].ptd_teacher_context == replayed[0].ptd_teacher_context
+    assert loaded[0].ptd_teacher_context["url"] == "http://10.0.0.2:18080/generate"
+    assert loaded[0].ptd_teacher_context["payload"] == replayed[0].ptd_teacher_context["payload"]
     assert metadata == {"source": "baseline"}
     assert source.calls == 1
 

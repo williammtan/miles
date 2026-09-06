@@ -59,6 +59,12 @@ def load_ptd_replay_rollout(args, data_source, rollout_id: int):
     if not isinstance(raw_samples, list):
         raise ValueError("PTD replay dump has no sample list")
     replayed = [Sample.from_dict(sample) for sample in raw_samples]
+    teacher_url = args.ptd_teacher_url or f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
+    for sample in replayed:
+        if sample.ptd_teacher_context is not None:
+            # The URL names a process, not semantic rollout data. A fresh
+            # recovery process must score against its own frozen-base fleet.
+            sample.ptd_teacher_context["url"] = teacher_url
     expected_count = args.rollout_batch_size * args.n_samples_per_prompt
     if len(replayed) != expected_count:
         raise ValueError(f"PTD replay expected {expected_count} saved samples, found {len(replayed)}")
