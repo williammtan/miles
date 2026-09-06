@@ -1682,6 +1682,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                                      "Must preserve sparse scoring fields and cache_salt.")
             parser.add_argument("--ptd-score-timeout", type=float, default=1200.0)
             parser.add_argument("--ptd-logits-chunk-size", type=int, default=128)
+            parser.add_argument("--ptd-exact-checkpoints", action="store_true",
+                                help="Commit synchronous PTD LoRA checkpoints with their exact rollout cursor.")
+            parser.add_argument(
+                "--ptd-replay-rollout-data",
+                type=str,
+                default=None,
+                help=(
+                    "Trusted rollout dump path template ({rollout_id}) for bounded exact PTD save/resume tests; "
+                    "keeps the normal serving fleet active."
+                ),
+            )
             parser.add_argument("--ptd-vocab-size", type=int, default=None,
                                 help="Unpadded checkpoint vocabulary size, required for exact TP softmax.")
             parser.add_argument(
@@ -3072,6 +3083,8 @@ def miles_validate_args(args):
         raise ValueError("PTD image path payloads require --rollout-media-cache-dir")
     if args.ptd_coef < 0:
         raise ValueError("--ptd-coef must be nonnegative")
+    if getattr(args, "ptd_exact_checkpoints", False) and (args.ptd_coef <= 0 or not is_lora_enabled(args)):
+        raise ValueError("--ptd-exact-checkpoints requires PTD with LoRA")
     if args.ptd_coef > 0:
         validate_teacher_route(args)
         if not args.ptd_hint_function_path or not args.ptd_vocab_size:
@@ -3147,7 +3160,8 @@ def miles_validate_args(args):
             or not os.path.exists(os.path.join(args.load, "latest_checkpointed_iteration.txt"))
         ):
             args.load = args.ref_load or args.hf_checkpoint
-            args.start_rollout_id = 0
+            if not getattr(args, "rollout_resume_dir", None):
+                args.start_rollout_id = 0
     else:
         if (
             args.load is None

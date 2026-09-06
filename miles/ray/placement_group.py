@@ -188,7 +188,14 @@ async def create_training_models(args, pgs, rollout_manager):
     start_rollout_ids = critic_start_rollout_ids if args.use_critic else actor_start_rollout_ids
 
     assert len(set(start_rollout_ids)) == 1
-    if args.start_rollout_id is None:
+    if getattr(args, "rollout_resume_dir", None):
+        from miles.rollout.ptd_checkpoint import validate_resume
+
+        expected_start = validate_resume(args)
+        if start_rollout_ids[0] != expected_start:
+            raise ValueError("Loaded PTD optimizer iteration differs from the committed rollout cursor")
+        args.start_rollout_id = expected_start
+    elif args.start_rollout_id is None:
         args.start_rollout_id = start_rollout_ids[0]
 
     await actor_model.set_rollout_manager()

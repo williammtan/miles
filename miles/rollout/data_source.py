@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 
+from miles.rollout.ptd_checkpoint import load_cursor, save_cursor
 from miles.utils.data import Dataset
 from miles.utils.misc import load_function
 from miles.utils.processing_utils import load_processor, load_tokenizer
@@ -124,6 +125,9 @@ class RolloutDataSource(DataSource):
     def save(self, rollout_id):
         if not self.args.rollout_global_dataset:
             return
+        if getattr(self.args, "ptd_exact_checkpoints", False):
+            save_cursor(self, rollout_id)
+            return
 
         state_dict = {
             "sample_offset": self.sample_offset,
@@ -138,6 +142,10 @@ class RolloutDataSource(DataSource):
 
     def load(self, rollout_id=None):
         if not self.args.rollout_global_dataset:
+            return
+        resume_root = getattr(self.args, "rollout_resume_dir", None)
+        if resume_root is not None:
+            load_cursor(self, resume_root, rollout_id)
             return
 
         if self.args.load is None:

@@ -1,6 +1,7 @@
 """Validation and deadline-bounded transport for privileged teacher scores."""
 
 import asyncio
+import hashlib
 import http.client
 import json
 import math
@@ -61,16 +62,33 @@ def _retryable(error):
                               urllib.error.URLError, http.client.HTTPException, TimeoutError, ConnectionError))
 
 
-def _retry_delay(error, attempt, deadline):
+def _request_summary(payload):
+    """Identify a failed scoring context without exposing its text, media or URL."""
+    ids = payload.get("input_ids", [])
+    context_hash = hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode()).hexdigest()[:20]
+    positions = payload.get("token_ids_logprob_positions", [])
+    return f"context={context_hash}, input_tokens={len(ids)}, scoring_rows={len(positions)}"
+
+
+def _retry_delay(error, attempt, deadline, request_summary=""):
     remaining = deadline - time.monotonic()
     if not _retryable(error) or attempt + 1 >= _MAX_ATTEMPTS or remaining <= 0:
-        raise RuntimeError("PTD teacher scoring failed within its retry deadline") from None
+        category = ("nonretryable_error" if not _retryable(error) else
+                    "deadline_exhausted" if remaining <= 0 else "attempts_exhausted")
+        status = (error.status if isinstance(error, aiohttp.ClientResponseError) else
+                  error.code if isinstance(error, urllib.error.HTTPError) else None)
+        # Exception messages/URLs and response bodies may contain private payloads.
+        raise RuntimeError(
+            f"PTD teacher scoring failed: {category}, error_type={type(error).__name__}, "
+            f"http_status={status}, attempts={attempt + 1}/{_MAX_ATTEMPTS}, {request_summary}"
+        ) from None
     return min(0.25 * 2**attempt, remaining)
 
 
 async def request_scores_async(url, payload, timeout):
     """Retry transient failures within one deadline, refreshing salted teacher caches."""
     deadline = time.monotonic() + timeout
+    summary = _request_summary(payload)
     async with aiohttp.ClientSession() as session:
         for attempt in range(_MAX_ATTEMPTS):
             remaining = deadline - time.monotonic()
@@ -85,12 +103,13 @@ async def request_scores_async(url, payload, timeout):
             except (ValueError, aiohttp.ContentTypeError):
                 raise ValueError("PTD teacher returned malformed score JSON") from None
             except Exception as error:
-                await asyncio.sleep(_retry_delay(error, attempt, deadline))
+                await asyncio.sleep(_retry_delay(error, attempt, deadline, summary))
 
 
 def request_scores(url, payload, timeout):
     """Synchronous equivalent used inside the training loss."""
     deadline = time.monotonic() + timeout
+    summary = _request_summary(payload)
     for attempt in range(_MAX_ATTEMPTS):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -106,7 +125,7 @@ def request_scores(url, payload, timeout):
         except ValueError:
             raise ValueError("PTD teacher returned malformed score JSON") from None
         except Exception as error:
-            time.sleep(_retry_delay(error, attempt, deadline))
+            time.sleep(_retry_delay(error, attempt, deadline, summary))
 
 
 def _attempt_payload(payload, attempt):

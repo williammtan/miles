@@ -106,7 +106,8 @@ def test_transport_retry_policy(monkeypatch, asynchronous, failure, retries):
 
         monkeypatch.setattr(scoring.aiohttp, "ClientSession", Session)
         monkeypatch.setattr(scoring.asyncio, "sleep", no_sleep)
-        invoke = lambda: asyncio.run(scoring.request_scores_async("http://teacher", payload, 5))
+        def invoke():
+            return asyncio.run(scoring.request_scores_async("http://teacher", payload, 5))
     else:
         def urlopen(request, *, timeout):
             calls.append((request.full_url, json.loads(request.data), timeout))
@@ -114,7 +115,8 @@ def test_transport_retry_policy(monkeypatch, asynchronous, failure, retries):
 
         monkeypatch.setattr(scoring.urllib.request, "urlopen", urlopen)
         monkeypatch.setattr(scoring.time, "sleep", lambda delay: None)
-        invoke = lambda: scoring.request_scores("http://teacher", payload, 5)
+        def invoke():
+            return scoring.request_scores("http://teacher", payload, 5)
     if retries:
         assert invoke() == good
         assert len(calls) == 2
@@ -125,6 +127,11 @@ def test_transport_retry_policy(monkeypatch, asynchronous, failure, retries):
             invoke()
         assert "secret" not in str(error.value)
         assert len(calls) == 1
+        if failure == 400:
+            message = str(error.value)
+            assert "nonretryable_error" in message and "http_status=400" in message
+            assert "attempts=1/3" in message and "input_tokens=2" in message
+            assert "deadline" not in message and "http://" not in message
 
 
 def test_retries_bounded_by_attempt_count_and_deadline(monkeypatch):
@@ -136,12 +143,12 @@ def test_retries_bounded_by_attempt_count_and_deadline(monkeypatch):
 
     monkeypatch.setattr(scoring.urllib.request, "urlopen", fail)
     monkeypatch.setattr(scoring.time, "sleep", lambda delay: None)
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="attempts_exhausted.*attempts=3/3"):
         scoring.request_scores("http://teacher", {}, 5)
     assert len(calls) == 3
     calls.clear()
     times = iter([0, 0, 6])
     monkeypatch.setattr(scoring.time, "monotonic", lambda: next(times))
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="deadline_exhausted.*attempts=1/3"):
         scoring.request_scores("http://teacher", {}, 5)
     assert len(calls) == 1

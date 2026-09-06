@@ -11,6 +11,7 @@ from miles.ray.rollout.addr_allocator import PortCursors
 from miles.ray.rollout.debug_data import RolloutDataInjectionUtil, load_debug_rollout_data, save_debug_rollout_data
 from miles.ray.rollout.eval_fleet import EvalFleet
 from miles.ray.rollout.metrics import log_eval_rollout_data, log_eval_skip, log_rollout_data
+from miles.ray.rollout.ptd_replay import load_ptd_replay_rollout
 from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
 from miles.ray.rollout.rollout_server import RolloutServer, start_rollout_servers
 from miles.ray.rollout.router_manager import start_session_server
@@ -241,7 +242,10 @@ class RolloutManager:
         log_eval_skip(rollout_id, self.args, reason)
 
     async def _get_rollout_data(self, rollout_id):
-        if self.args.load_debug_rollout_data is not None:
+        if self.args.ptd_replay_rollout_data is not None:
+            data, metadata = load_ptd_replay_rollout(self.args, self.data_source, rollout_id)
+            metrics = None
+        elif self.args.load_debug_rollout_data is not None:
             data, metadata = load_debug_rollout_data(self.args, rollout_id=rollout_id)
             metrics = None
         else:

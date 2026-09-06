@@ -5,6 +5,7 @@ import os
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
 
 from miles.ray.placement_group import create_placement_groups, create_rollout_manager, create_training_models
+from miles.rollout.ptd_checkpoint import publish_checkpoint, validate_resume
 from miles.utils import object_store
 from miles.utils.arguments import parse_args
 from miles.utils.audit_utils.process_identity import MainProcessIdentity
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 async def train(args):
     assert not args.fully_async, "--fully-async requires the async driver: run train_async.py"
+    validate_resume(args)
     configure_logger(args, source=MainProcessIdentity())
     maybe_start_periodic_pyspy_dump()
     # allocate the GPUs
@@ -74,6 +76,10 @@ async def train(args):
     # special case for eval-only
     if args.num_rollout == 0 and args.eval_interval is not None:
         await rollout_manager.eval.remote(rollout_id=0)
+    elif (getattr(args, "rollout_resume_dir", None) and args.start_rollout_id == args.num_rollout
+          and args.eval_interval is not None):
+        # Final checkpoint is durable before evaluation; a crash there must be recoverable.
+        await rollout_manager.eval.remote(rollout_id=args.num_rollout - 1)
 
     async def offload_train():
         if args.use_critic:
@@ -98,6 +104,7 @@ async def train(args):
         if args.use_critic:
             await save_training_model(critic_model)
         await rollout_manager.save.remote(rollout_id)
+        publish_checkpoint(args, rollout_id)
 
     # train loop.
     # note that for async training, one can change the position of the sync operation(ray.get).
