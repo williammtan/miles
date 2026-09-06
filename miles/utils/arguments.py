@@ -766,6 +766,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--rollout-resume-dir",
+                type=str,
+                default=None,
+                help="Root containing saved rollout cursor; use with a training checkpoint to resume matching data order; missing/incompatible state is an error.",
+            )
+            parser.add_argument(
+                "--rollout-media-cache-dir",
+                type=str,
+                default=None,
+                help="Shared directory for lossless prepared RGB PNGs. Used with --rollout-media-payload-paths; required for PTD path payloads.",
+            )
+            parser.add_argument(
                 "--rollout-media-payload-paths",
                 action="store_true",
                 default=False,
@@ -3054,6 +3066,10 @@ def miles_validate_args(args):
                 "please make sure it is a valid megatron checkpoint directory."
             )
 
+    if getattr(args, "rollout_media_cache_dir", None) and not args.rollout_media_payload_paths:
+        raise ValueError("--rollout-media-cache-dir requires --rollout-media-payload-paths")
+    if args.ptd_coef > 0 and args.rollout_media_payload_paths and not getattr(args, "rollout_media_cache_dir", None):
+        raise ValueError("PTD image path payloads require --rollout-media-cache-dir")
     if args.ptd_coef < 0:
         raise ValueError("--ptd-coef must be nonnegative")
     if args.ptd_coef > 0:

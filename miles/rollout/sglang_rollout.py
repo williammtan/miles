@@ -33,6 +33,7 @@ from miles.utils.processing_utils import (
     load_processor,
     load_tokenizer,
 )
+from miles.utils.rollout_media_cache import prepared_image_paths
 from miles.utils.types import Sample
 
 from .generate_utils.generate_endpoint_utils import (
@@ -229,13 +230,13 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
     if deferred_refs and deferred_refs.get("image"):
         if getattr(args, "rollout_media_payload_paths", False):
-            # The engine sees the dataset's filesystem, so hand it the paths.
-            # Re-encoding the decoded PIL back to PNG costs ~84 ms per page on
-            # the same asyncio thread that submits requests, and inflates each
-            # request to megabytes of base64. The engine applies the identical
-            # smart_resize to whatever it receives, so the pixels reaching the
-            # model are the same either way.
-            payload["image_data"] = list(deferred_refs["image"])
+            cache_dir = getattr(args, "rollout_media_cache_dir", None)
+            if getattr(args, "ptd_coef", 0) > 0 and not cache_dir:
+                raise ValueError("PTD image path payloads require --rollout-media-cache-dir")
+            payload["image_data"] = (
+                prepared_image_paths(sample.multimodal_inputs["images"], cache_dir)
+                if cache_dir else list(deferred_refs["image"])
+            )
         else:
             payload["image_data"] = [
                 encode_image_for_rollout_engine(image) for image in sample.multimodal_inputs["images"]
@@ -246,7 +247,12 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
         sample.multimodal_inputs = None
     elif sample.multimodal_inputs and sample.multimodal_inputs["images"]:
         image_data = sample.multimodal_inputs["images"]
-        payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
+        cache_dir = getattr(args, "rollout_media_cache_dir", None)
+        payload["image_data"] = (
+            prepared_image_paths(image_data, cache_dir)
+            if cache_dir and getattr(args, "rollout_media_payload_paths", False)
+            else [encode_image_for_rollout_engine(image) for image in image_data]
+        )
 
     if sample.multimodal_inputs and sample.multimodal_inputs.get("audios"):
         import base64 as _b64
