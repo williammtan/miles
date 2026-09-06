@@ -1,4 +1,4 @@
-"""Exact coarsened JSD on vocabulary-sharded logits (PTD-PO, equations 13–17)."""
+"""Top-K coarsened JSD on vocabulary-sharded logits for PTD-PO."""
 
 import math
 
@@ -84,7 +84,8 @@ def teacher_log_probs_at_student_topk(
         raise ValueError("PTD student and teacher Top-K tensors must have identical shapes")
     if ((student_ids < 0) | (student_ids >= vocab_size)).any():
         raise ValueError("PTD student Top-K contains an invalid vocabulary ID")
-    if (student_ids.sort(-1).values[..., 1:] == student_ids.sort(-1).values[..., :-1]).any():
+    ordered_student = student_ids.sort(-1).values
+    if (ordered_student[..., 1:] == ordered_student[..., :-1]).any():
         raise ValueError("PTD student Top-K contains duplicate vocabulary IDs")
     width = teacher_ids.shape[-1]
     miss_count = max(1, vocab_size - width)
@@ -100,7 +101,8 @@ def teacher_log_probs_at_student_topk(
         tail = (1 - values.exp().sum(-1)).clamp_min(1e-10)
         missing = tail.log().unsqueeze(-1) - math.log(miss_count)
         outputs.append(torch.where(found, matched, missing))
-    return torch.cat(outputs) if outputs else teacher_log_probs.new_empty(student_ids.shape)
+    return (torch.cat(outputs) if outputs else
+            torch.empty(student_ids.shape, device=student_ids.device, dtype=teacher_log_probs.dtype))
 
 
 def _validate_probability_mass(probs, valid):
