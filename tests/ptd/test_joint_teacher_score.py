@@ -10,8 +10,6 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
 
 from miles.backends.training_utils.loss_hub import ptd as loss_ptd
 from miles.backends.training_utils.parallel import set_parallel_state
@@ -23,6 +21,7 @@ from miles.utils.types import Sample
 def _context():
     return {
         "url": "http://teacher/generate", "response_tokens": [2, 3], "vocab_size": 5,
+        "score_mode": "precomputed_teacher_topk_tail_v1",
         "payload": {"input_ids": [10, 11, 0, 1, 2, 3], "image_data": ["/same/image.png"],
                     "lora_path": None, "return_logprob": True, "logprob_start_len": 3,
                     "sampling_params": {"max_new_tokens": 0, "temperature": 0}},
@@ -188,7 +187,7 @@ def _dense_coarsening(student, teacher, ids):
     return torch.stack(losses).sum()
 
 
-def test_training_ignores_stale_probabilities_and_changed_teacher_topk(monkeypatch):
+def test_training_uses_precomputed_teacher_topk_without_rpc(monkeypatch):
     state = SimpleNamespace(cp=SimpleNamespace(size=1), tp=SimpleNamespace(rank=0, size=1, group=None))
     set_parallel_state(state)
     args = Namespace(qkv_format="thd", true_on_policy_mode=False, ptd_top_k=2, ptd_vocab_size=5,
@@ -196,41 +195,38 @@ def test_training_ignores_stale_probabilities_and_changed_teacher_topk(monkeypat
     context = _context()
     batch = {"ptd_teacher_context": [context], "response_lengths": [2], "total_lengths": [4],
              "unconcat_tokens": [torch.tensor([0, 1, 2, 3])], "loss_masks": [torch.ones(2)],
-             # Deliberately wrong IDs and impossible mass from an earlier cold pass.
-             "ptd_teacher_ids": [torch.tensor([[0, 2], [1, 2]])],
-             "ptd_teacher_log_probs": [torch.full((2, 2), -0.001)]}
+             "ptd_teacher_ids": [torch.tensor([[1, 3], [4, 0]])],
+             "ptd_teacher_log_probs": [torch.tensor([[math.log(.4), math.log(.25)],
+                                                       [math.log(.45), math.log(.25)]])]}
     logits = torch.tensor([[[0., 0., 0., 0., 0.], [2., -1., 0., 0.5, 1.],
                             [-1., 2., 0., 0.5, 1.], [0., 0., 0., 0., 0.]]], requires_grad=True)
-    calls = []
-    returned_ids = []
-
-    def request(url, payload, timeout):
-        calls.append(payload)
-        student = payload["token_ids_logprob_positions"][1:]
-        assert student == logits[0, 1:3].detach().topk(2).indices.tolist()
-        assert payload["top_logprobs_num"] == 2
-        returned_ids[:] = [sorted(set(ids) | set(sorted(range(5), key=probs.__getitem__, reverse=True)[:2]))
-                           for probs, ids in zip(_probabilities(), student, strict=True)]
-        return _response(context, _probabilities(), student, 2)
-
-    monkeypatch.setattr(rollout_ptd, "request_scores", request)
+    monkeypatch.setattr(rollout_ptd, "request_scores",
+                        lambda *a, **kw: pytest.fail("training must not contact the frozen tutor"))
     loss = loss_ptd.ptd_loss_sum(args, batch, logits)
-    reference = _dense_coarsening(logits[0, 1:3], torch.tensor(_probabilities()), returned_ids)
+    student_ids = logits[0, 1:3].detach().topk(2).indices.tolist()
+    teacher = torch.tensor(_probabilities())
+    approximated = teacher.clone()
+    for row, ids in zip(approximated, batch["ptd_teacher_ids"][0], strict=True):
+        mask = torch.ones(5, dtype=torch.bool)
+        mask[ids] = False
+        row[mask] = row[mask].sum() / mask.sum()
+    reference = _dense_coarsening(logits[0, 1:3], approximated, student_ids)
     torch.testing.assert_close(loss, reference, atol=1e-7, rtol=1e-6)
     grad = torch.autograd.grad(loss, logits, retain_graph=True)[0]
     reference_grad = torch.autograd.grad(reference, logits)[0]
     torch.testing.assert_close(grad, reference_grad, atol=1e-7, rtol=1e-6)
-    assert len(calls) == 1 and grad.norm() > 0
-    del batch["ptd_teacher_ids"], batch["ptd_teacher_log_probs"]
-    loss_without_legacy_fields = loss_ptd.ptd_loss_sum(args, batch, logits)
-    torch.testing.assert_close(loss, loss_without_legacy_fields, atol=0, rtol=0)
+    assert grad.norm() > 0
+    del batch["ptd_teacher_ids"]
+    with pytest.raises(ValueError, match="teacher-target fields"):
+        loss_ptd.ptd_loss_sum(args, batch, logits)
 
 
-def test_rollout_keeps_online_response_specific_hint_without_teacher_inference(monkeypatch):
+def test_rollout_scores_online_response_specific_hint_once_before_training(monkeypatch):
     from miles.utils import misc
 
     args = Namespace(ptd_coef=0.05, reward_key=None, ptd_top_k=2, ptd_hint_function_path="online.hint",
-                     ptd_hint_key="ptd_hint", ptd_teacher_url="http://teacher/generate", ptd_vocab_size=5)
+                     ptd_hint_key="ptd_hint", ptd_teacher_url="http://teacher/generate", ptd_vocab_size=5,
+                     ptd_score_timeout=12.0)
     sample = Sample(tokens=[0, 1, 2, 3], response_length=2, response="the actual failed response", reward=0,
                     status=Sample.Status.COMPLETED, metadata={"grade_valid": True, "ptd_media_payload": {"image_data": ["same"]}})
     tokenizer = SimpleNamespace(apply_chat_template=lambda *a, **kw: [10, 11, 4], encode=lambda *a, **kw: [4])
@@ -241,45 +237,20 @@ def test_rollout_keeps_online_response_specific_hint_without_teacher_inference(m
         hints.append(callback_sample.tokens.copy())
         return "Check the object immediately left of the ruler."
 
-    def forbidden_request(*args, **kwargs):
-        pytest.fail("Rollout must not query the teacher model")
+    calls = []
+
+    async def teacher_request(url, payload, timeout):
+        calls.append(payload)
+        assert payload["token_ids_logprob_positions"] == [[], [], []]
+        return _response(_context(), _probabilities(), [[], []], 2)
 
     monkeypatch.setattr(misc, "load_function", lambda path: hint_fn)
-    monkeypatch.setattr(rollout_ptd, "request_scores", forbidden_request)
+    monkeypatch.setattr(rollout_ptd, "request_scores_async", teacher_request)
     asyncio.run(rollout_ptd.collect_teacher_targets(args, sample, tokenizer))
     assert hints == [[0, 1, 2, 3]]
-    assert sample.ptd_teacher_ids.shape == sample.ptd_teacher_log_probs.shape == (0, 2)
+    assert len(calls) == 1
+    assert sample.ptd_teacher_ids.shape == sample.ptd_teacher_log_probs.shape == (2, 2)
+    assert sample.ptd_teacher_ids.tolist() == [[1, 3], [4, 0]]
     assert sample.ptd_teacher_context["response_tokens"] == [2, 3]
     assert sample.ptd_teacher_context["payload"]["input_ids"] == [10, 11, 0, 1, 2, 3]
     sample.validate()
-
-
-def _tp_joint_worker(rank, rendezvous):
-    dist.init_process_group("gloo", init_method=f"file://{rendezvous}", rank=rank, world_size=2)
-    tp = SimpleNamespace(rank=rank, size=2, group=dist.group.WORLD)
-    student = torch.tensor([[0, 4], [1, 4]])
-    expected_ids = [[0, 1, 3, 4], [0, 1, 4, -1]]
-    expected_probs = [[0.1, 0.4, 0.25, 0.2], [0.25, 0.05, 0.45, 0.0]]
-
-    def joint(context, rows, top_k, timeout):
-        assert dist.get_rank() == 0, "Only TP0 may contact the teacher"
-        assert rows == student.tolist() and top_k == 2
-        return expected_ids, [[math.log(value) if value > 0 else -math.inf for value in row] for row in expected_probs]
-
-    loss_ptd.score_teacher_joint = joint
-    ids, log_probs = loss_ptd._teacher_union_targets(_context(), student, timeout=12, tp=tp)
-    assert ids.tolist() == expected_ids
-    torch.testing.assert_close(log_probs.exp(), torch.tensor(expected_probs))
-
-    def failing_joint(*args):
-        assert dist.get_rank() == 0
-        raise ValueError("inconsistent same-forward overlap")
-
-    loss_ptd.score_teacher_joint = failing_joint
-    with pytest.raises(RuntimeError, match="inconsistent same-forward overlap"):
-        loss_ptd._teacher_union_targets(_context(), student, timeout=12, tp=tp)
-    dist.destroy_process_group()
-
-
-def test_tp_broadcasts_new_union_ids_probabilities_and_failure(tmp_path):
-    mp.spawn(_tp_joint_worker, args=(str(tmp_path / "joint-tp"),), nprocs=2, join=True)

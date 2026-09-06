@@ -1681,6 +1681,10 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                                 help="Frozen initial-model /generate endpoint; default requires --use-miles-router. "
                                      "Must preserve sparse scoring fields and cache_salt.")
             parser.add_argument("--ptd-score-timeout", type=float, default=1200.0)
+            parser.add_argument("--ptd-score-concurrency", type=int, default=16,
+                                help="Maximum concurrent frozen-tutor Top-K requests during rollout.")
+            parser.add_argument("--ptd-score-mode", choices=["precomputed_teacher_topk_tail_v1"],
+                                default="precomputed_teacher_topk_tail_v1")
             parser.add_argument("--ptd-logits-chunk-size", type=int, default=128)
             parser.add_argument("--ptd-exact-checkpoints", action="store_true",
                                 help="Commit synchronous PTD LoRA checkpoints with their exact rollout cursor.")
@@ -3089,8 +3093,9 @@ def miles_validate_args(args):
         validate_teacher_route(args)
         if not args.ptd_hint_function_path or not args.ptd_vocab_size:
             raise ValueError("PTD requires --ptd-hint-function-path and --ptd-vocab-size")
-        if not 0 < args.ptd_top_k <= args.ptd_vocab_size or args.ptd_logits_chunk_size <= 0:
-            raise ValueError("PTD requires 0 < top-K <= vocabulary size and a positive chunk size")
+        if (not 0 < args.ptd_top_k <= args.ptd_vocab_size or args.ptd_logits_chunk_size <= 0
+                or args.ptd_score_concurrency <= 0):
+            raise ValueError("PTD requires 0 < top-K <= vocabulary size, a positive chunk size and score concurrency")
         if args.train_backend != "megatron" or args.context_parallel_size != 1 or args.qkv_format != "thd":
             raise ValueError("PTD currently requires Megatron, CP=1, THD packed training")
         if not args.calculate_per_token_loss or args.loss_type != "policy_loss" or args.use_opd:

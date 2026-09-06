@@ -9,7 +9,12 @@ import torch
 import torch.distributed as dist
 
 from miles.backends.training_utils.loss_hub.ptd import attach_ptd_normalizers
-from miles.backends.training_utils.loss_hub.ptd_math import sparse_vocab_parallel_jsd, support_union, vocab_parallel_topk
+from miles.backends.training_utils.loss_hub.ptd_math import (
+    sparse_vocab_parallel_jsd,
+    support_union,
+    teacher_log_probs_at_student_topk,
+    vocab_parallel_topk,
+)
 from miles.backends.training_utils.parallel import set_parallel_state
 
 
@@ -46,6 +51,11 @@ def main():
     local = padded[:, rank * 6:(rank + 1) * 6].clone().requires_grad_()
     student_ids = vocab_parallel_topk(local, 3, vocab_start=rank * 6, vocab_size=11, tp_group=dist.group.WORLD, chunk_size=2)
     assert torch.equal(student_ids, full.detach().topk(3).indices)
+    teacher_top_values, teacher_top_ids = teacher.detach().log_softmax(-1).topk(3)
+    matched = teacher_log_probs_at_student_topk(
+        student_ids, teacher_top_ids.cpu(), teacher_top_values.cpu(), vocab_size=11, chunk_size=2,
+    )
+    assert matched.device == student_ids.device and torch.isfinite(matched).all()
     ids = support_union(student_ids, teacher.topk(3).indices)
     q_lp = teacher.log_softmax(-1).gather(-1, ids.clamp_min(0))
     sparse = sparse_vocab_parallel_jsd(local, ids, q_lp, vocab_start=rank * 6, vocab_size=11,
@@ -61,7 +71,9 @@ def main():
     # Exercise the actual DP collective used to make optimizer-step normalizers.
     set_parallel_state(SimpleNamespace(effective_dp=SimpleNamespace(size=2, group=dist.group.WORLD)))
     data = {"tokens": [None, None], "loss_masks": [torch.ones(3 + rank, device=device), torch.ones(2, device=device)],
-            "ptd_teacher_context": [None if rank == 0 else {}, {}]}
+            "ptd_teacher_ids": ([torch.empty(0, 3, device=device), torch.ones(2, 3, device=device)]
+                                if rank == 0 else
+                                [torch.ones(4, 3, device=device), torch.ones(2, 3, device=device)])}
     attach_ptd_normalizers(SimpleNamespace(ptd_coef=0.5), data, [SimpleNamespace(micro_batch_indices=[[0], [1]])], [2])
     assert data["ptd_normalizers"] == [[11, 8], [11, 8]]
     report = {"backend": args.backend, "rank": rank, "world_size": world, "loss_max_error": (sparse-reference).abs().max().item(),

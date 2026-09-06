@@ -1,5 +1,7 @@
 """Exact coarsened JSD on vocabulary-sharded logits (PTD-PO, equations 13–17)."""
 
+import math
+
 import torch
 import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
@@ -64,6 +66,41 @@ def support_union(student_ids, teacher_ids):
     duplicate = torch.zeros_like(ids, dtype=torch.bool)
     duplicate[..., 1:] = ids[..., 1:] == ids[..., :-1]
     return ids.masked_fill(duplicate, -1)
+
+
+@torch.no_grad()
+def teacher_log_probs_at_student_topk(
+    student_ids, teacher_ids, teacher_log_probs, *, vocab_size, chunk_size=128,
+):
+    """Match fixed teacher Top-K to student Top-K with uniform tail compensation.
+
+    PTD-PO stores independent teacher and student Top-K sets. When a current
+    student ID is absent from the stored teacher Top-K, its tutor probability is
+    approximated by distributing the tutor's remaining mass uniformly over the
+    remaining vocabulary. Chunking avoids an O(response_length * K^2) workspace.
+    """
+    _validate_sparse_support(teacher_ids, teacher_log_probs, vocab_size)
+    if student_ids.shape != teacher_ids.shape:
+        raise ValueError("PTD student and teacher Top-K tensors must have identical shapes")
+    if ((student_ids < 0) | (student_ids >= vocab_size)).any():
+        raise ValueError("PTD student Top-K contains an invalid vocabulary ID")
+    if (student_ids.sort(-1).values[..., 1:] == student_ids.sort(-1).values[..., :-1]).any():
+        raise ValueError("PTD student Top-K contains duplicate vocabulary IDs")
+    width = teacher_ids.shape[-1]
+    miss_count = max(1, vocab_size - width)
+    outputs = []
+    for start in range(0, student_ids.shape[0], chunk_size):
+        end = start + chunk_size
+        query = student_ids[start:end]
+        keys = teacher_ids[start:end].to(device=query.device, dtype=query.dtype, non_blocking=True)
+        values = teacher_log_probs[start:end].to(device=query.device, dtype=torch.float32, non_blocking=True)
+        matches = query.unsqueeze(-1).eq(keys.unsqueeze(-2))
+        found = matches.any(-1)
+        matched = (matches * values.unsqueeze(-2)).sum(-1)
+        tail = (1 - values.exp().sum(-1)).clamp_min(1e-10)
+        missing = tail.log().unsqueeze(-1) - math.log(miss_count)
+        outputs.append(torch.where(found, matched, missing))
+    return torch.cat(outputs) if outputs else teacher_log_probs.new_empty(student_ids.shape)
 
 
 def _validate_probability_mass(probs, valid):

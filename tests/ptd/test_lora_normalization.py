@@ -77,8 +77,6 @@ def test_lora_provider_preserves_requested_loss_normalization(monkeypatch, reque
 
 
 def _global_reduction_worker(rank, rendezvous):
-    from miles.backends.training_utils.loss_hub import ptd
-
     dist.init_process_group("gloo", init_method=rendezvous, rank=rank, world_size=2)
     try:
         set_parallel_state(SimpleNamespace(
@@ -90,15 +88,12 @@ def _global_reduction_worker(rank, rendezvous):
         lengths = [1, 4] if rank == 0 else [2, 5]
         masks = [torch.ones(n) for n in lengths]
         data = {"tokens": [None, None], "loss_masks": masks,
-                "ptd_teacher_context": [None, None] if rank == 0 else [{}, {}]}
+                "ptd_teacher_ids": ([torch.empty(0, 3), torch.empty(0, 3)] if rank == 0 else
+                                    [torch.ones(n, 3) for n in lengths])}
         attach_ptd_normalizers(args, data, [SimpleNamespace(micro_batch_indices=[[0], [1]])], [2])
         assert data["ptd_normalizers"] == [[12, 7], [12, 7]]
         weight = torch.tensor(0.7, dtype=torch.float64, requires_grad=True)
         q = torch.tensor([0.2, 0.3, 0.5], dtype=torch.float64)
-        ptd.score_teacher_joint = lambda context, ids, k, timeout: (
-            [[0, 1, 2, -1, -1, -1] for _ in ids],
-            [q.log().tolist() + [-float("inf")] * 3 for _ in ids],
-        )
         features = torch.tensor([-1., 0.5, 2.], dtype=torch.float64)
         local_loss = weight * 0
         tutor_sum = weight * 0
@@ -107,9 +102,11 @@ def _global_reduction_worker(rank, rendezvous):
             batch = {
                 "unconcat_tokens": [torch.ones(n + 1, dtype=torch.long)], "total_lengths": [n + 1],
                 "response_lengths": [n], "loss_masks": [mask], "ptd_normalizers": [[12, 7]],
-                "ptd_teacher_context": [None if rank == 0 else {"response_tokens": [1] * n}],
-                "ptd_teacher_ids": [torch.arange(3).expand(n, -1)],
-                "ptd_teacher_log_probs": [q.log().expand(n, -1)],
+                "ptd_teacher_context": [None if rank == 0 else {
+                    "response_tokens": [1] * n, "score_mode": "precomputed_teacher_topk_tail_v1"}],
+                "ptd_teacher_ids": [torch.empty(0, 3, dtype=torch.long) if rank == 0
+                                    else torch.arange(3).expand(n, -1)],
+                "ptd_teacher_log_probs": [torch.empty(0, 3) if rank == 0 else q.log().expand(n, -1)],
             }
             # A differentiable stand-in policy numerator isolates PTD's reduction contract.
             policy_sum = weight.square() * n

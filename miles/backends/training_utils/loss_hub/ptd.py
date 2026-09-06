@@ -2,37 +2,13 @@
 
 import torch
 import torch.distributed as dist
-
 from miles.backends.training_utils.loss_hub.logit_processors import _iter_response_chunks
-from miles.backends.training_utils.loss_hub.ptd_math import sparse_vocab_parallel_jsd, vocab_parallel_topk
+from miles.backends.training_utils.loss_hub.ptd_math import (
+    sparse_vocab_parallel_jsd,
+    teacher_log_probs_at_student_topk,
+    vocab_parallel_topk,
+)
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.rollout.ptd import score_teacher_joint
-
-
-def _teacher_union_targets(context, student_ids, *, timeout, tp):
-    """Broadcast one coherent joint teacher union, with at most 2K values per row."""
-    shape = (student_ids.shape[0], 2 * student_ids.shape[1])
-    ids = torch.empty(shape, dtype=torch.long, device=student_ids.device)
-    result = torch.empty(shape, dtype=torch.float32, device=student_ids.device)
-    error = [None]
-    if tp.rank == 0:
-        try:
-            selected, values = score_teacher_joint(
-                context, student_ids.cpu().tolist(), student_ids.shape[1], timeout,
-            )
-            ids.copy_(torch.tensor(selected, dtype=ids.dtype, device=ids.device))
-            result.copy_(torch.tensor(values, dtype=result.dtype, device=result.device))
-        except Exception as exc:
-            error[0] = f"{type(exc).__name__}: {exc}"
-    if tp.size > 1:
-        src = dist.get_global_rank(tp.group, 0)
-        dist.broadcast_object_list(error, src=src, group=tp.group)
-    if error[0] is not None:
-        raise RuntimeError(f"PTD teacher sparse scoring failed: {error[0]}")
-    if tp.size > 1:
-        dist.broadcast(ids, src=src, group=tp.group)
-        dist.broadcast(result, src=src, group=tp.group)
-    return ids, result.detach()
 
 
 def ptd_loss_sum(args, batch, logits):
@@ -40,8 +16,10 @@ def ptd_loss_sum(args, batch, logits):
     state = get_parallel_state()
     assert state.cp.size == 1 and args.qkv_format == "thd"
     total = logits.reshape(-1)[:1].float().sum() * 0
-    targets = batch.get("ptd_teacher_context")
-    if targets is None:
+    teacher_ids = batch.get("ptd_teacher_ids")
+    teacher_log_probs = batch.get("ptd_teacher_log_probs")
+    contexts = batch.get("ptd_teacher_context")
+    if teacher_ids is None or teacher_log_probs is None or contexts is None:
         raise ValueError("PTD enabled but teacher-target fields are missing from the training batch")
     tp_group = state.tp.group if state.tp.size > 1 else None
     vocab_start = state.tp.rank * logits.shape[-1]
@@ -50,20 +28,32 @@ def ptd_loss_sum(args, batch, logits):
         response_lengths=batch["response_lengths"], include_response_indices=False,
     )
     for index, (response_logits, response_tokens, _) in enumerate(chunks):
-        context = targets[index]
-        if context is None or response_tokens.numel() == 0:
+        stored_ids = teacher_ids[index]
+        stored_log_probs = teacher_log_probs[index]
+        context = contexts[index]
+        if context is None:
+            if stored_ids.numel() or stored_log_probs.numel():
+                raise ValueError("PTD inactive response unexpectedly contains teacher targets")
             continue
-        if response_tokens.tolist() != context["response_tokens"]:
+        if context.get("score_mode") != "precomputed_teacher_topk_tail_v1":
+            raise ValueError("PTD teacher targets use an incompatible scoring objective")
+        if response_tokens.tolist() != context.get("response_tokens"):
             raise ValueError("PTD packed-training response positions differ from the teacher continuation")
+        if stored_ids.numel() == 0 or response_tokens.numel() == 0:
+            raise ValueError("PTD active response is missing precomputed teacher Top-K targets")
+        if stored_ids.shape != stored_log_probs.shape or stored_ids.shape[0] != response_tokens.numel():
+            raise ValueError("PTD packed-training response positions differ from the stored teacher targets")
         student_ids = vocab_parallel_topk(
             response_logits, args.ptd_top_k, vocab_start=vocab_start, vocab_size=args.ptd_vocab_size,
             tp_group=tp_group, chunk_size=args.ptd_logits_chunk_size,
         )
-        ids, teacher_union = _teacher_union_targets(
-            context, student_ids, timeout=args.ptd_score_timeout, tp=state.tp,
+        teacher_at_student = teacher_log_probs_at_student_topk(
+            student_ids, stored_ids, stored_log_probs, vocab_size=args.ptd_vocab_size,
+            chunk_size=args.ptd_logits_chunk_size,
         )
         token_losses = sparse_vocab_parallel_jsd(
-            response_logits, ids, teacher_union, vocab_start=vocab_start, vocab_size=args.ptd_vocab_size,
+            response_logits, student_ids, teacher_at_student,
+            vocab_start=vocab_start, vocab_size=args.ptd_vocab_size,
             tp_group=tp_group, chunk_size=args.ptd_logits_chunk_size,
         )
         total = total + (token_losses * batch["loss_masks"][index]).sum()
@@ -109,9 +99,9 @@ def attach_ptd_normalizers(args, rollout_data, data_iterators, num_microbatches)
             start = offset * iterator.micro_batch_size
             indices = range(start, start + count * iterator.micro_batch_size)
         masks = rollout_data["loss_masks"]
-        contexts = rollout_data["ptd_teacher_context"]
+        teacher_ids = rollout_data["ptd_teacher_ids"]
         grpo_tokens = sum(max(int(masks[i].sum()), 1) for i in indices)
-        selected_tokens = sum(int(masks[i].sum()) for i in indices if contexts[i] is not None)
+        selected_tokens = sum(int(masks[i].sum()) for i in indices if teacher_ids[i].numel() > 0)
         counts = torch.tensor([grpo_tokens, selected_tokens], dtype=torch.int64, device=masks[0].device)
         if state.effective_dp.size > 1:
             dist.all_reduce(counts, group=state.effective_dp.group)

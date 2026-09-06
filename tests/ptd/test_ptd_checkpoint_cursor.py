@@ -57,6 +57,7 @@ def source(tmp_path):
                                  hf_checkpoint=str(model), ptd_coef=.05, ptd_exact_checkpoints=True,
                                  rollout_global_dataset=True, n_samples_per_prompt=2, rollout_shuffle=True,
                                  rollout_seed=42, rollout_batch_size=2, lora_rank=32, lora_alpha=64,
+                                 ptd_score_mode="precomputed_teacher_topk_tail_v1", ptd_score_concurrency=16,
                                  num_rollout=3, start_rollout_id=None, rollout_resume_dir=None,
                                  lora_adapter_path=None)
     value.dataset = SmallDataset()
@@ -122,7 +123,7 @@ def test_checkpoint_commit_and_final_iteration_resume(source):
         checkpoint.validate_resume(source.args)
 
 
-@pytest.mark.parametrize("change", ["cursor", "adapter", "alpha", "missing_commit", "wrong_adapter"])
+@pytest.mark.parametrize("change", ["cursor", "adapter", "alpha", "score_mode", "missing_commit", "wrong_adapter"])
 def test_checkpoint_binding_rejects_partial_mixed_or_reconfigured_resume(source, change):
     commit(source)
     adapter = Path(source.args.lora_adapter_path)
@@ -132,6 +133,8 @@ def test_checkpoint_binding_rejects_partial_mixed_or_reconfigured_resume(source,
         (adapter / "checkpoint_complete.json").write_text("{}")
     elif change == "alpha":
         source.args.lora_alpha *= 2
+    elif change == "score_mode":
+        source.args.ptd_score_mode = "obsolete_joint_rpc_mode"
     elif change == "missing_commit":
         (adapter.parent / "ptd_checkpoint_complete.json").unlink()
     else:

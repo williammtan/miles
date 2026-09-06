@@ -56,9 +56,9 @@ class Sample:
     remove_sample: bool = False
     teacher_log_probs: list[float] | None = None  # Log probabilities from teacher model for OPD
     opd_reverse_kl: list[float] | None = None  # Precomputed per-token OPD reverse-KL estimate
-    ptd_teacher_ids: torch.Tensor | None = None  # Legacy codec field; joint scoring uses empty [0, K]
-    ptd_teacher_log_probs: torch.Tensor | None = None  # Legacy codec field; no cross-forward probabilities
-    ptd_teacher_context: dict | None = None  # Exact teacher prefix/media for sparse cross-scoring
+    ptd_teacher_ids: torch.Tensor | None = None  # Frozen tutor Top-K IDs, computed once after the online hint
+    ptd_teacher_log_probs: torch.Tensor | None = None  # Matching frozen tutor full-vocabulary log probabilities
+    ptd_teacher_context: dict | None = None  # Exact rollout/hint identity and continuation alignment
 
     class Status(Enum):
         PENDING = "pending"

@@ -68,7 +68,8 @@ def batch_and_args(targets):
     batch = {
         "unconcat_tokens": tokens, "response_lengths": response_lengths, "total_lengths": list(map(len, tokens)),
         "loss_masks": masks, "advantages": [torch.zeros(n) for n in response_lengths],
-        "ptd_teacher_context": [{"response_tokens": t[-n:].tolist()} if active else None
+        "ptd_teacher_context": [{"response_tokens": t[-n:].tolist(),
+                                  "score_mode": "precomputed_teacher_topk_tail_v1"} if active else None
                                 for t, n, active in zip(tokens, response_lengths, targets, strict=True)],
         "ptd_teacher_ids": [teacher_ids.expand(n, -1) if active else torch.empty(0, 2, dtype=torch.long)
                             for n, active in zip(response_lengths, targets, strict=True)],
@@ -80,56 +81,46 @@ def batch_and_args(targets):
     return args, batch, logits, teacher
 
 
-def install_teacher(monkeypatch, teacher):
-    calls = []
-
-    def score(context, ids, k, timeout):
-        calls.append(ids)
-        support = support_union(torch.tensor(ids), teacher.topk(k).indices.expand(len(ids), -1))
-        values = teacher[support.clamp_min(0)].masked_fill(support < 0, -torch.inf)
-        return support.tolist(), values.tolist()
-
-    monkeypatch.setattr(ptd, "score_teacher_joint", score)
-    return calls
+def tail_approximated_teacher(teacher, k):
+    values, ids = teacher.topk(k)
+    result = torch.full_like(teacher, ((1 - values.exp().sum()) / (teacher.numel() - k)).log())
+    result[ids] = values
+    return result
 
 
-def test_all_wrong_zero_advantages_have_nonzero_tutor_gradient(monkeypatch):
+def test_all_wrong_zero_advantages_have_nonzero_tutor_gradient():
     args, batch, logits, teacher = batch_and_args([True, True])
-    calls = install_teacher(monkeypatch, teacher)
     loss, metrics = policy_loss_function(args, batch, logits, torch.sum)
     loss.backward()
     assert metrics["pg_loss"] == 0
     assert loss > 0 and logits.grad.norm() > 0
-    assert calls
     # Every prompt-only logit, final unused logit, and padding logit is untouched.
     assert torch.equal(logits.grad[0, [0, 4, 5, 6, 8]], torch.zeros(5, 7))
 
 
-def test_correct_responses_have_exactly_zero_tutor_loss_gradient(monkeypatch):
+def test_correct_responses_have_exactly_zero_tutor_loss_gradient():
     args, batch, logits, teacher = batch_and_args([False, False])
-    calls = install_teacher(monkeypatch, teacher)
     loss, metrics = policy_loss_function(args, batch, logits, torch.sum)
     loss.backward()
     assert loss.item() == metrics["ptd_loss"].item() == 0
     assert torch.count_nonzero(logits.grad) == 0
-    assert not calls
 
 
-def test_first_correct_later_failed_and_selected_denominator(monkeypatch):
+def test_first_correct_later_failed_and_selected_denominator():
     args, batch, logits, teacher = batch_and_args([False, True])
-    install_teacher(monkeypatch, teacher)
     loss, _ = policy_loss_function(args, batch, logits, torch.sum)
     # Final Megatron division by all 4 response tokens cancels the inserted factor.
     response = logits[0, 7:8]
-    ids = support_union(response.detach().topk(2).indices, teacher.topk(2).indices.view(1, -1))
-    expected = args.ptd_coef * dense_reference(response, teacher.expand_as(response), ids).mean()
+    ids = response.detach().topk(2).indices
+    approximated = tail_approximated_teacher(teacher, 2)
+    expected = args.ptd_coef * dense_reference(response, approximated.expand_as(response), ids).mean()
     torch.testing.assert_close(loss / 4, expected)
     loss.backward()
     assert torch.count_nonzero(logits.grad[0, :7]) == 0
     assert logits.grad[0, 7].norm() > 0
 
 
-def test_lambda_zero_exact_baseline_grpo(monkeypatch):
+def test_lambda_zero_exact_baseline_grpo():
     args, batch, logits, teacher = batch_and_args([True, True])
     batch["advantages"] = [torch.tensor([1., -1., 0.5]), torch.tensor([-0.5])]
     args.ptd_coef = 0
@@ -137,7 +128,6 @@ def test_lambda_zero_exact_baseline_grpo(monkeypatch):
     delattr(baseline_args, "ptd_coef")
     # No target fields are required and no teacher is contacted at lambda=0.
     batch = {key: val for key, val in batch.items() if not key.startswith("ptd_")}
-    calls = install_teacher(monkeypatch, teacher)
     baseline_logits = logits.detach().clone().requires_grad_()
     baseline, baseline_metrics = policy_loss_function(baseline_args, batch, baseline_logits, torch.sum)
     loss, metrics = policy_loss_function(args, batch, logits, torch.sum)
@@ -146,7 +136,6 @@ def test_lambda_zero_exact_baseline_grpo(monkeypatch):
     assert loss.item() == baseline.item()
     assert metrics.keys() == baseline_metrics.keys()
     assert torch.equal(logits.grad, baseline_logits.grad)
-    assert not calls
 
 
 @pytest.mark.parametrize("status", [Sample.Status.COMPLETED, Sample.Status.TRUNCATED])
@@ -180,7 +169,7 @@ def test_grade_valid_is_separate_from_wrong_answer(valid, reward, expected):
 def test_step_normalizer_includes_all_microbatches():
     set_parallel_state(SimpleNamespace(effective_dp=SimpleNamespace(size=1)))
     data = {"tokens": [None] * 3, "loss_masks": [torch.ones(3), torch.ones(7), torch.ones(2)],
-            "ptd_teacher_context": [None, {}, {}]}
+            "ptd_teacher_ids": [torch.empty(0, 2), torch.ones(7, 2), torch.ones(2, 2)]}
     iterator = SimpleNamespace(micro_batch_indices=[[1], [0, 2]])
     ptd.attach_ptd_normalizers(Namespace(ptd_coef=0.5), data, [iterator], [2])
     assert data["ptd_normalizers"] == [[12, 9]] * 3

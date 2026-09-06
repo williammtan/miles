@@ -1,15 +1,20 @@
 """Privileged teacher scoring, separate from outcome rewards and advantages."""
 
+import asyncio
 import json
 import math
+import time
 import uuid
 from argparse import Namespace
 from typing import Any
 
 import torch
 
-from miles.rollout.ptd_scoring import request_scores, validate_score_entries
+from miles.rollout.ptd_scoring import request_scores, request_scores_async, validate_score_entries
 from miles.utils.types import Sample
+
+PTD_SCORE_MODE = "precomputed_teacher_topk_tail_v1"
+_score_limiters: dict[asyncio.AbstractEventLoop, tuple[int, asyncio.Semaphore]] = {}
 
 
 def validate_teacher_route(args: Namespace) -> None:
@@ -89,7 +94,7 @@ def teacher_score_context(args: Namespace, sample: Sample, tokenizer, hint: str 
     }
     url = args.ptd_teacher_url or f"http://{args.sglang_router_ip}:{args.sglang_router_port}/generate"
     return {"payload": payload, "url": url, "response_tokens": list(sample.tokens[-sample.response_length:]),
-            "vocab_size": getattr(args, "ptd_vocab_size", None)}
+            "vocab_size": getattr(args, "ptd_vocab_size", None), "score_mode": PTD_SCORE_MODE}
 
 
 def extract_score_rows(response: dict, context: dict, field: str) -> list:
@@ -137,10 +142,49 @@ async def collect_teacher_targets(args: Namespace, sample: Sample, tokenizer) ->
         return
     sample.metadata[args.ptd_hint_key] = hint
     sample.ptd_teacher_context = teacher_score_context(args, sample, tokenizer, hint)
-    # Preserve the ragged codec fields without caching probabilities from another
-    # teacher forward. Training collects the entire union in one joint request.
-    sample.ptd_teacher_ids = torch.empty((0, args.ptd_top_k), dtype=torch.int32)
-    sample.ptd_teacher_log_probs = torch.empty((0, args.ptd_top_k), dtype=torch.float32)
+    started = time.monotonic()
+    loop = asyncio.get_running_loop()
+    concurrency = getattr(args, "ptd_score_concurrency", 16)
+    configured, limiter = _score_limiters.setdefault(loop, (concurrency, asyncio.Semaphore(concurrency)))
+    if configured != concurrency:
+        raise ValueError("PTD score concurrency changed within one rollout event loop")
+    async with limiter:
+        ids, log_probs = await score_teacher_topk(
+            sample.ptd_teacher_context, args.ptd_top_k, args.ptd_score_timeout,
+        )
+    sample.ptd_teacher_ids = torch.tensor(ids, dtype=torch.int32)
+    sample.ptd_teacher_log_probs = torch.tensor(log_probs, dtype=torch.float32)
+    sample.metadata["ptd_teacher_score_seconds"] = time.monotonic() - started
+    sample.metadata["ptd_teacher_score_rows"] = len(ids)
+
+
+async def score_teacher_topk(context: dict, top_k: int, timeout: float) -> tuple[list[list[int]], list[list[float]]]:
+    """Compute the frozen tutor Top-K once, before actor optimization.
+
+    This follows the official PTD-PO execution order: teacher targets are a
+    rollout artifact, and optimizer microbatches consume those fixed targets.
+    No student-selected token matrix is sent over HTTP.
+    """
+    vocab_size = context["vocab_size"]
+    if type(vocab_size) is not int or not 0 < top_k <= vocab_size:
+        raise ValueError("PTD teacher scoring requires 0 < Top-K <= vocabulary size")
+    payload = {
+        **context["payload"],
+        "top_logprobs_num": top_k,
+        # Empty sparse rows activate the exact-ID multimodal path in the pinned
+        # SGLang patch without requesting any student-selected cross scores.
+        "token_ids_logprob_positions": [[] for _ in range(len(context["response_tokens"]) + 1)],
+        # Isolate hybrid-model prefix state across logical teacher requests.
+        "cache_salt": uuid.uuid4().hex,
+    }
+    response = await request_scores_async(context["url"], payload, timeout)
+    rows = extract_score_rows(response, context, "input_top_logprobs")
+    ids, log_probs = [], []
+    for row in rows:
+        values = validate_score_entries(row, vocab_size, count=top_k)
+        ids.append(list(values))
+        log_probs.append(list(values.values()))
+    return ids, log_probs
 
 
 def score_teacher_joint(

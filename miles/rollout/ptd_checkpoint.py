@@ -22,6 +22,7 @@ RUN_KEYS = (
     "lora_rank", "lora_alpha", "lora_dropout", "target_modules", "lr", "lr_decay_style",
     "lr_decay_iters", "lr_decay_samples", "num_rollout", "global_batch_size", "weight_decay",
     "adam_beta1", "adam_beta2", "ptd_coef", "ptd_top_k", "ptd_vocab_size", "ptd_hint_function_path",
+    "ptd_score_mode", "ptd_score_concurrency",
     "advantage_estimator", "kl_coef", "kl_loss_coef", "entropy_coef", "calculate_per_token_loss",
     "eps_clip", "eps_clip_high", "rollout_temperature", "rollout_top_p", "rollout_max_response_len",
     "tensor_model_parallel_size", "context_parallel_size", "pipeline_model_parallel_size",
