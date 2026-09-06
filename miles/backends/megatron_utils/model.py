@@ -28,6 +28,7 @@ from megatron.training.training import get_model
 from miles.backends.megatron_utils.ft.indep_dp import allreduce_grads_and_losses_across_replicas
 from miles.backends.megatron_utils.ft.types import TrainStepOutcome
 from miles.backends.megatron_utils.local_weight_checksum import dump_local_weight_checksums
+from miles.backends.megatron_utils.lora_checkpoint_state import advance_scheduler_after_load
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.audit_utils.witness.module import witness_dump_and_clear_stale
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
@@ -996,7 +997,9 @@ def initialize_model_and_optimizer(
 
     # Megatron checkpoint loads can restore scheduler state directly. In that
     # case, stepping by the checkpoint iteration here would double-count.
-    if opt_param_scheduler is not None and not (args.use_checkpoint_opt_param_scheduler and iteration > 0):
-        opt_param_scheduler.step(increment=iteration * args.global_batch_size)
+    advance_scheduler_after_load(
+        opt_param_scheduler, optimizer, iteration=iteration, global_batch_size=args.global_batch_size,
+        use_checkpoint_scheduler=args.use_checkpoint_opt_param_scheduler,
+    )
 
     return model, optimizer, opt_param_scheduler, iteration

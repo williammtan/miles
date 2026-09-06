@@ -10,6 +10,7 @@ from typing import Any
 import torch
 import torch.distributed as dist
 
+from miles.backends.megatron_utils import lora_checkpoint_state as checkpoint_state
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.lora import is_lora_enabled, lora_rollout_enabled  # noqa: F401  (re-exported)
 
@@ -420,7 +421,7 @@ def save_lora_checkpoint(
     never change, so they are not saved.
 
     This function is collective: **all ranks must call it** because the bridge
-    export performs TP all-gather internally. Only ``dp_rank == 0`` writes files.
+    export performs TP all-gather internally. Every rank writes its native and training shard; HF export writes on DP rank zero.
     """
     import json
 
@@ -428,6 +429,8 @@ def save_lora_checkpoint(
 
     from miles.utils import megatron_bridge_utils
 
+    if optimizer is not None and (not isinstance(iteration, int) or iteration < 0):
+        raise ValueError("A training LoRA checkpoint requires a nonnegative iteration")
     save_path = Path(save_dir)
     parallel_state = get_parallel_state()
     is_dp_cp_rank_0 = parallel_state.effective_dp.rank == 0 and parallel_state.cp.rank == 0
@@ -438,15 +441,21 @@ def save_lora_checkpoint(
     if dist.is_initialized():
         dist.barrier()
 
+    checkpoint_state.begin_checkpoint(save_path)
+    rng_state = checkpoint_state.capture_rng() if optimizer is not None else None
+
     adapter_state: dict[str, torch.Tensor] = {}
     for model_chunk in model:
         for name, param in model_chunk.named_parameters():
             if _is_adapter_param_name(name):
+                if name in adapter_state:
+                    raise RuntimeError(f"Duplicate adapter parameter across model chunks: {name}")
                 adapter_state[name] = param.data.cpu()
 
     global_rank = dist.get_rank() if dist.is_initialized() else 0
     native_path = save_path / f"adapter_megatron_rank{global_rank}.pt"
-    torch.save(adapter_state, native_path)
+    checkpoint_state.validate_adapter(model, adapter_state)
+    checkpoint_state.atomic_save(adapter_state, native_path)
     logger.info(f"Saved {len(adapter_state)} adapter tensors (native) to {native_path}")
 
     # ---- HF PEFT format (uses bridge for correct name/weight conversion) ----
@@ -495,9 +504,13 @@ def save_lora_checkpoint(
     # ---- Training state (optimizer + scheduler) for resume ----
     if optimizer is not None:
         rank = dist.get_rank() if dist.is_initialized() else 0
-        torch.save(
+        checkpoint_state.atomic_save(
             {
+                "version": 2,
                 "iteration": iteration,
+                "rng": rng_state,
+                "optimizer_layout": checkpoint_state.optimizer_layout(optimizer),
+                "parameter_states": checkpoint_state.parameter_states(optimizer),
                 "optimizer": optimizer.state_dict(),
                 "opt_param_scheduler": opt_param_scheduler.state_dict() if opt_param_scheduler else None,
             },
@@ -508,6 +521,12 @@ def save_lora_checkpoint(
     if dist.is_initialized():
         dist.barrier()
 
+    checkpoint_state.complete_checkpoint(
+        save_path, iteration=iteration, training=optimizer is not None,
+        configuration=checkpoint_state.checkpoint_configuration(args),
+    )
+    if rng_state is not None:
+        checkpoint_state.restore_rng(rng_state)
     return str(save_path)
 
 
@@ -517,6 +536,7 @@ def load_lora_adapter(
     *,
     optimizer: Any | None = None,
     opt_param_scheduler: Any | None = None,
+    checkpoint_args: Namespace | None = None,
 ) -> tuple[bool, int | None]:
     """Load LoRA adapter weights from a saved checkpoint into the model.
 
@@ -533,6 +553,7 @@ def load_lora_adapter(
         adapter_path: Path to the adapter checkpoint directory.
         optimizer: If provided, restore optimizer state for training resume.
         opt_param_scheduler: If provided, restore LR scheduler state.
+        checkpoint_args: Original training configuration; required for versioned checkpoints.
 
     Returns:
         ``(loaded, iteration)`` — *loaded* is True if adapter weights were
@@ -543,6 +564,15 @@ def load_lora_adapter(
     if not adapter_dir.exists():
         logger.warning(f"LoRA adapter path does not exist: {adapter_dir}")
         return False, None
+
+    manifest = checkpoint_state.validate_checkpoint(
+        adapter_dir, training=optimizer is not None,
+        configuration=checkpoint_state.checkpoint_configuration(checkpoint_args),
+    )
+    if manifest is not None and optimizer is not None:
+        checkpoint_state.preflight_training_state(adapter_dir, manifest, optimizer, opt_param_scheduler)
+    if manifest is None:
+        logger.warning("Loading legacy LoRA checkpoint: optimizer moments and RNG may be absent")
 
     tp_rank = get_parallel_state().tp.rank
     pp_rank = get_parallel_state().pp.rank
@@ -556,7 +586,11 @@ def load_lora_adapter(
             logger.warning(f"Using legacy tp/pp-named adapter shard {legacy}; only valid when EP<=TP")
             native_path = legacy
     if native_path.exists():
-        state_dict = torch.load(native_path, map_location="cpu", weights_only=True)
+        state_dict = (
+            checkpoint_state.load_validated_adapter(native_path, model)
+            if manifest is not None
+            else torch.load(native_path, map_location="cpu", weights_only=True)
+        )
         loaded = 0
         for model_chunk in model:
             for name, param in model_chunk.named_parameters():
@@ -600,12 +634,23 @@ def _load_training_state(
     # param group metadata), so full unpickling is required here.
     training_state = torch.load(state_path, map_location="cpu", weights_only=False)
 
-    optimizer.load_state_dict(training_state["optimizer"])
+    if training_state.get("version") == 2:
+        checkpoint_state.restore_optimizer(optimizer, training_state)
+    else:
+        optimizer.load_state_dict(training_state["optimizer"])
     logger.info("Restored optimizer state from LoRA checkpoint")
 
     if opt_param_scheduler is not None and training_state.get("opt_param_scheduler") is not None:
         opt_param_scheduler.load_state_dict(training_state["opt_param_scheduler"])
+        if training_state.get("version") == 2:
+            optimizer._lora_checkpoint_scheduler_restored = True
         logger.info("Restored LR scheduler state from LoRA checkpoint")
+
+    if training_state.get("version") == 2:
+        if opt_param_scheduler is not None and training_state["opt_param_scheduler"] is None:
+            raise RuntimeError("LoRA checkpoint is missing scheduler state")
+        checkpoint_state.restore_rng(training_state["rng"])
+        optimizer._lora_checkpoint_rng_state = training_state["rng"]
 
     iteration = training_state.get("iteration")
     if iteration is not None:
