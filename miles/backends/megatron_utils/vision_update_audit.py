@@ -217,7 +217,11 @@ def verify_vision_sync_checksums(
         for name in expected:
             candidates = [name]
             if name.startswith("model.visual.") or name.startswith("model.vision_model."):
-                candidates.append(name.removeprefix("model."))
+                sglang_name = name.removeprefix("model.")
+                # Qwen3VLForConditionalGeneration.hf_to_sglang_mapper also
+                # renames the vision attention's packed projection.
+                sglang_name = sglang_name.replace(".attn.qkv.", ".attn.qkv_proj.")
+                candidates.append(sglang_name)
             matches = [candidate for candidate in candidates if candidate in actual]
             if len(matches) > 1:
                 ambiguous.append(name)

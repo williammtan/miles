@@ -57,11 +57,27 @@ def test_sync_audit_requires_changed_exact_vision_and_projection():
 
 
 def test_sync_audit_maps_hf_visual_wrapper_to_sglang_names():
-    first = {"model.visual.patch.weight": "a", "model.visual.merger.weight": "b"}
-    second = {"model.visual.patch.weight": "c", "model.visual.merger.weight": "d"}
+    first = {
+        "model.visual.patch.weight": "a",
+        "model.visual.blocks.0.attn.qkv.weight": "b",
+        "model.visual.merger.weight": "c",
+    }
+    second = {
+        "model.visual.patch.weight": "d",
+        "model.visual.blocks.0.attn.qkv.weight": "e",
+        "model.visual.merger.weight": "f",
+    }
     body = {
         "success": True,
-        "ranks": [{"checksums": {"visual.patch.weight": "c", "visual.merger.weight": "d"}}],
+        "ranks": [
+            {
+                "checksums": {
+                    "visual.patch.weight": "d",
+                    "visual.blocks.0.attn.qkv_proj.weight": "e",
+                    "visual.merger.weight": "f",
+                }
+            }
+        ],
     }
     verify_vision_sync_checksums(second, [body], previous=first, require_change=True)
 
