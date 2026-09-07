@@ -74,13 +74,13 @@ def _create_placement_group(num_gpus, is_rdt: bool = False):
         ray.kill(actor)
 
     bundle_infos = [(i, gpu_ids[i][0], gpu_ids[i][1]) for i in range(num_bundles)]
-    if is_rdt:
-        # Give the trainer the node PACK filled, so rollout bundles land where GPUs
-        # are still free: RayEngine STRICT_PACKs its SchedulerActors onto the engine
-        # actor's node and deadlocks if nothing there is unreserved.
-        node_bundle_counts: dict = {}
-        for _, node_identifier, _ in bundle_infos:
-            node_bundle_counts[node_identifier] = node_bundle_counts.get(node_identifier, 0) + 1
+    node_bundle_counts: dict = {}
+    for _, node_identifier, _ in bundle_infos:
+        node_bundle_counts[node_identifier] = node_bundle_counts.get(node_identifier, 0) + 1
+    if is_rdt or len(set(node_bundle_counts.values())) > 1:
+        # Put the fullest nodes first. Besides RDT, this keeps a one-node trainer
+        # contiguous when some GPUs on another node are deliberately reserved for
+        # an external frozen teacher.
         sorted_bundle_infos = sorted(bundle_infos, key=lambda info: (-node_bundle_counts[info[1]], *sort_key(info)))
     else:
         sorted_bundle_infos = sorted(bundle_infos, key=sort_key)

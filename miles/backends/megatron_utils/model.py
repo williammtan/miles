@@ -624,6 +624,14 @@ def train_one_step(
     if outcome == TrainStepOutcome.NORMAL:
         dumper_phase_util.finalize(model)
 
+    vision_update_snapshot = None
+    if getattr(args, "audit_vision_updates", False) and not disable_optimizer and valid_step:
+        if multi_lora:
+            raise RuntimeError("--audit-vision-updates is for full-parameter training, not multi-LoRA")
+        from miles.backends.megatron_utils.vision_update_audit import capture_vision_update
+
+        vision_update_snapshot = capture_vision_update(model, optimizer)
+
     if not disable_optimizer and valid_step:
         if multi_lora:
             from miles.backends.megatron_utils.multi_lora_utils import step_stepped_adapter_slots
@@ -638,6 +646,11 @@ def train_one_step(
             # Update learning rate.
             assert update_successful
             opt_param_scheduler.step(increment=num_rollouts)
+
+            if vision_update_snapshot is not None:
+                from miles.backends.megatron_utils.vision_update_audit import verify_vision_update
+
+                verify_vision_update(vision_update_snapshot, rollout_id=rollout_id, step_id=step_id)
 
     # release grad (multi-LoRA retains accumulated grads; stepped slots were
     # zeroed selectively inside step_adapter_slots)

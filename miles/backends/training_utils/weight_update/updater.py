@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 
 import torch
 import torch.distributed as dist
+import ray
 from ray.actor import ActorHandle
 from tqdm import tqdm
 
@@ -68,6 +69,7 @@ class WeightUpdater:
             assert lora_sync_config is not None
         self._lora_sync_config = lora_sync_config
         self._registered_adapters: set[str] = set()
+        self._last_vision_sync_checksums: dict[str, str] | None = None
         # Set by the actor before each update_weights call (loaded map at reconcile).
         self.multi_lora_adapters = None
 
@@ -127,6 +129,7 @@ class WeightUpdater:
             ), "the LoRA checksum manifest is recorded on one rank, which must hold the full adapter"
         with timer("update_weights_implementation"):
             pbar = tqdm(desc=f"[{protocol.group_name}] Update weights", total=0) if protocol.is_sender else None
+            vision_checksums: dict[str, str] = {}
             for bucket in self._hf_weight_iterator.iter_hf_weights(
                 self.weights_getter(),
                 include_base=sync_base,
@@ -134,6 +137,12 @@ class WeightUpdater:
                 materialize=protocol.is_sender,
             ):
                 if protocol.is_sender:
+                    if getattr(self.args, "audit_vision_weight_sync", False):
+                        from sglang.srt.utils.weight_checker import _hash_tensor
+
+                        for name, tensor in bucket:
+                            if ".visual." in f".{name}." or ".vision_model." in f".{name}.":
+                                vision_checksums[name] = _hash_tensor(tensor)
                     if driver and checksums is not None:
                         record_lora_checksums(bucket, checksums)
                     protocol.send_bucket(bucket)
@@ -146,8 +155,28 @@ class WeightUpdater:
             if protocol.use_weight_update_session and driver:
                 end_weight_update(protocol.rollout_engines, expected_lora_checksums=checksums)
                 set_weight_version(protocol.rollout_engines, self.weight_version)
+                if getattr(self.args, "audit_vision_weight_sync", False):
+                    self._audit_vision_weight_sync(vision_checksums)
                 resume_engines(protocol.rollout_engines)
             dist.barrier(group=get_gloo_group())
+
+    def _audit_vision_weight_sync(self, expected: dict[str, str]) -> None:
+        from miles.backends.megatron_utils.vision_update_audit import verify_vision_sync_checksums
+
+        results = ray.get([engine.check_weights.remote("checksum") for engine in self.protocol.rollout_engines])
+        verify_vision_sync_checksums(
+            expected,
+            results,
+            previous=self._last_vision_sync_checksums,
+            require_change=self.weight_version > 1,
+        )
+        self._last_vision_sync_checksums = expected
+        logger.info(
+            "vision_weight_sync_audit version=%d tensors=%d engines=%d",
+            self.weight_version,
+            len(expected),
+            len(results),
+        )
 
     def _iter_base_buckets(self, *, materialize: bool):
         return self._hf_weight_iterator.iter_hf_weights(self.weights_getter(), materialize=materialize)

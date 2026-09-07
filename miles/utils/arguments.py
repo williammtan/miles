@@ -2534,6 +2534,24 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 type=str,
                 default=None,
             )
+            parser.add_argument(
+                "--audit-vision-updates",
+                action="store_true",
+                help=(
+                    "Fail a training step unless the vision encoder and its projection are trainable, "
+                    "receive nonzero gradients, and change in the low-precision model weights that are "
+                    "exported to rollout workers. Also requires SGLANG_VLM_CACHE_SIZE_MB=0 so rollout "
+                    "vision embeddings cannot outlive a weight update."
+                ),
+            )
+            parser.add_argument(
+                "--audit-vision-weight-sync",
+                action="store_true",
+                help=(
+                    "For a bounded VLM smoke run, checksum every exported vision tensor and compare it "
+                    "with every TP=1 SGLang worker after each full-model weight update."
+                ),
+            )
             return parser
 
         def add_mtp_training_arguments(parser):
