@@ -207,10 +207,28 @@ def verify_vision_sync_checksums(
                 f"vision weight sync audit requires TP=1 rollout engines; engine {engine_index} returned {len(ranks)} ranks"
             )
         actual = ranks[0].get("checksums") or {}
-        missing = sorted(set(expected) - set(actual))
-        mismatched = sorted(name for name, digest in expected.items() if actual.get(name) != digest)
-        if missing or mismatched:
+        # The HF iterator emits Qwen VLM keys such as
+        # ``model.visual.blocks.0...``. SGLang registers the same module at the
+        # top level and therefore reports ``visual.blocks.0...`` from
+        # ``named_parameters()``. Match only this known wrapper-prefix
+        # difference and still require an exact checksum for every tensor.
+        resolved = {}
+        ambiguous = []
+        for name in expected:
+            candidates = [name]
+            if name.startswith("model.visual.") or name.startswith("model.vision_model."):
+                candidates.append(name.removeprefix("model."))
+            matches = [candidate for candidate in candidates if candidate in actual]
+            if len(matches) > 1:
+                ambiguous.append(name)
+            elif matches:
+                resolved[name] = matches[0]
+        missing = sorted(set(expected) - set(resolved))
+        mismatched = sorted(
+            name for name, digest in expected.items() if name in resolved and actual[resolved[name]] != digest
+        )
+        if missing or mismatched or ambiguous:
             raise RuntimeError(
                 f"rollout engine {engine_index} vision weights differ after sync: "
-                f"missing={missing[:8]}, mismatched={mismatched[:8]}"
+                f"missing={missing[:8]}, mismatched={mismatched[:8]}, ambiguous={ambiguous[:8]}"
             )

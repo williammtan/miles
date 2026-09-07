@@ -56,6 +56,16 @@ def test_sync_audit_requires_changed_exact_vision_and_projection():
     verify_vision_sync_checksums(second, [body, body], previous=first, require_change=True)
 
 
+def test_sync_audit_maps_hf_visual_wrapper_to_sglang_names():
+    first = {"model.visual.patch.weight": "a", "model.visual.merger.weight": "b"}
+    second = {"model.visual.patch.weight": "c", "model.visual.merger.weight": "d"}
+    body = {
+        "success": True,
+        "ranks": [{"checksums": {"visual.patch.weight": "c", "visual.merger.weight": "d"}}],
+    }
+    verify_vision_sync_checksums(second, [body], previous=first, require_change=True)
+
+
 @pytest.mark.parametrize("failure", ["stale", "missing", "mismatch"])
 def test_sync_audit_rejects_invalid_rollout_vision(failure):
     first = {"model.visual.patch.weight": "a", "model.visual.merger.weight": "b"}
