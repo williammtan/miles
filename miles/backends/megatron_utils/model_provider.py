@@ -48,6 +48,12 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
     # loss / sequence handling
     provider.calculate_per_token_loss = args.calculate_per_token_loss  # CP>1 VL models assert this
     provider.variable_seq_lengths = args.variable_seq_lengths
+    # Bridge providers inherit MTP from the HF config. Honor the explicit Miles
+    # runtime setting in full-parameter mode just as the LoRA bridge path does.
+    # In particular, --mtp-num-layers 0 must remove the checkpoint's MTP layer;
+    # otherwise it adds an unintended auxiliary loss and materializes a large
+    # fp32 [tokens, vocab/TP] cross-entropy buffer during RL log-prob passes.
+    provider.mtp_num_layers = getattr(args, "mtp_num_layers", None) or None
 
     # numerics (training infra, not model-defining)
     provider.attention_softmax_in_fp32 = args.attention_softmax_in_fp32
