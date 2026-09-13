@@ -205,3 +205,28 @@ class TestMergeSamples:
         assert merged is t0
         assert merged.tokens == t0.tokens
         assert merged.rollout_routed_experts is not None
+
+
+def test_merge_covers_the_ptd_fields():
+    """The PTD fields on Sample must not break the multi-turn merge (every session-server sample goes through it)."""
+    import torch
+    from miles.rollout.generate_utils.sample_utils import merge_samples
+    from miles.utils.types import Sample
+
+    class Tok:
+        def decode(self, ids):
+            return "".join(chr(97 + i % 26) for i in ids)
+
+    a = Sample(prompt="p", tokens=[1, 2, 3, 4], response="ab", response_length=2, status=Sample.Status.COMPLETED,
+               loss_mask=[1, 1], rollout_log_probs=[-0.1, -0.2])
+    b = Sample(prompt="p", tokens=[1, 2, 3, 4, 5, 6, 7], response="c", response_length=1, status=Sample.Status.COMPLETED,
+               loss_mask=[1], rollout_log_probs=[-0.3])
+    merged = merge_samples([a, b], Tok())
+    assert merged.tokens == [1, 2, 3, 4, 5, 6, 7] and merged.response_length == 5
+    assert merged.ptd_teacher_ids is None and merged.ptd_teacher_log_probs is None and merged.ptd_teacher_context is None
+
+    b.ptd_teacher_ids = torch.zeros(1, 2)
+    b.ptd_teacher_log_probs = torch.zeros(1, 2)
+    b.ptd_teacher_context = {"response_tokens": [7], "payload": {"input_ids": [7]}}
+    with pytest.raises(AssertionError, match="cannot be merged across turns"):
+        merge_samples([a, b], Tok())

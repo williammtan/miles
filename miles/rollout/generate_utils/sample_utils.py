@@ -50,6 +50,12 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
         if sample.rollout_log_probs is None:
             sample.rollout_log_probs = [0.0] * sample.response_length
 
+    def _merge_unset(field):
+        # PTD teacher data is computed once over the finished episode, never per turn.
+        x, y = getattr(a, field), getattr(b, field)
+        assert x is None and y is None, f"{field} cannot be merged across turns; compute it on the merged sample"
+        return None
+
     def _merge_optional_per_token(field):
         # Optional OPD per-token lists (teacher_log_probs, opd_reverse_kl): merge like
         # rollout_log_probs when present (zeros over the injected observation span), else keep None.
@@ -178,6 +184,9 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
             non_generation_time=_merge_equal_value("non_generation_time"),
             spec_info=_merge_spec_info(a.spec_info, b.spec_info),
             prefix_cache_info=_merge_prefix_cache_info(a.prefix_cache_info, b.prefix_cache_info),
+            ptd_teacher_ids=_merge_unset("ptd_teacher_ids"),
+            ptd_teacher_log_probs=_merge_unset("ptd_teacher_log_probs"),
+            ptd_teacher_context=_merge_unset("ptd_teacher_context"),
         )
     except AssertionError as e:
         if hasattr(e, "add_note"):
