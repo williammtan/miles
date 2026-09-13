@@ -16,6 +16,7 @@ from miles.utils.types import RolloutBatch
 from ...utils.data import process_rollout_data
 from ...utils.ray_utils import Box
 from .cp_utils import slice_log_prob_with_cp, slice_with_cp
+from .media_refs import materialize_media_refs
 from .mm_data import expand_multimodal_rollout_data_in_place
 from .parallel import get_parallel_state
 from miles.backends.training_utils.loss_hub.ptd import attach_ptd_normalizers
@@ -47,6 +48,8 @@ def get_rollout_data(
         parallel_state.effective_dp.size,
         witness_info=witness_info,
     )
+    # Images handed over as file paths become pixel tensors here, on this rank.
+    materialize_media_refs(args, rollout_data)
     # move tokens to GPU in advance
     rollout_data["tokens"] = [
         torch.tensor(t, dtype=torch.long, device=torch.cuda.current_device()) for t in rollout_data["tokens"]

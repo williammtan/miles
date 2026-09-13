@@ -39,6 +39,7 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "rollout_ids": ValueSpec(codec="ndarray", dtype="int64"),
     "rollout_mask_sums": ValueSpec(codec="ndarray", dtype="int64"),
     "multimodal_train_inputs": ValueSpec(codec="ragged_tensor_dict"),
+    "media_refs": ValueSpec(codec="msgpack_ragged"),
     "prompt": ValueSpec(codec="msgpack_ragged"),
     "metadata": ValueSpec(codec="msgpack_ragged"),
     "ptd_teacher_context": ValueSpec(codec="msgpack_ragged"),
@@ -147,6 +148,9 @@ def convert_samples_to_train_data(
 
     if any(sample.multimodal_train_inputs is not None for sample in samples):
         train_data["multimodal_train_inputs"] = [sample.multimodal_train_inputs for sample in samples]
+    elif any((sample.metadata or {}).get("_deferred_media_refs") for sample in samples):
+        # Path-carried images: each trainer rank builds its own pixel tensors (training_utils/media_refs.py).
+        train_data["media_refs"] = [(sample.metadata or {}).get("_deferred_media_refs") for sample in samples]
 
     if any(sample.weight_versions for sample in samples):
         train_data["weight_versions"] = [sample.weight_versions for sample in samples]
@@ -326,7 +330,7 @@ def can_schedule_on_rollout_side(args, data: dict[str, Any], train_parallel_conf
         return False
     if is_multi_lora_enabled(args):
         return False
-    if "multimodal_train_inputs" in data:
+    if "multimodal_train_inputs" in data or "media_refs" in data:
         return False
     if "rollout_ids" not in data:
         return False
@@ -392,6 +396,7 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
         for key in [
             "tokens",
             "multimodal_train_inputs",
+            "media_refs",
             "response_lengths",
             "rewards",
             "truncated",
